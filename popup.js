@@ -61,12 +61,12 @@ if (record && record.error === null) {
     grant.hidden = false;
   } else if (!meta?.attachedSpec) {
     hint.textContent =
-      'webRequest did not attach. Open brave://extensions → Zscaler MITM → service worker errors.';
+      'webRequest did not attach. Open chrome://extensions → Zscaler MITM → service worker errors.';
   } else if (!meta.lastAt && !meta.canaryAt) {
     hint.textContent = 'Reload this tab to capture the certificate.';
   } else if (!meta.lastAt && meta.canaryAt) {
     hint.textContent =
-      'TLS cert API is disabled. Open brave://flags, search WebRequestSecurityInfo, set Enabled, restart Brave. If that flag is missing, launch Brave with --enable-features=WebRequestSecurityInfo';
+      'TLS cert API is disabled. Open chrome://flags, search WebRequestSecurityInfo, set Enabled, restart the browser. If that flag is missing, launch with --enable-features=WebRequestSecurityInfo';
   } else {
     hint.textContent =
       'Last capture tab=' +

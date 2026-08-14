@@ -58,7 +58,7 @@ test('iconKind + statusLine table', () => {
 
   const old = { url: '', subject: null, issuer: null, zscaler: false, error: 'no-security-info' };
   assert.equal(iconKind(old), 'yellow');
-  assert.equal(statusLine(old), 'Needs Chrome/Brave 144+');
+  assert.equal(statusLine(old), 'Needs Chromium 144+');
 
   const parse = { url: '', subject: null, issuer: null, zscaler: false, error: 'parse' };
   assert.equal(iconKind(parse), 'yellow');

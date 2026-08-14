@@ -144,7 +144,7 @@ Filenames: `{default,yellow,red}-{16,32,48,128}.png`.
 | HTTPS, issuer is not Zscaler | default spy | Subject + issuer fields, not matched |
 | Issuer matches Zscaler | red spy | Subject + issuer fields, matched |
 | Parse failure | yellow spy | “Couldn’t parse certificate” |
-| No `securityInfo` (Chromium older than 144) | yellow spy | “Needs Chrome/Brave 144+” |
+| No `securityInfo` (Chromium older than 144) | yellow spy | “Needs Chromium 144+” |
 | No stored record yet | yellow spy | “Reload the tab to inspect the certificate” |
 | HTTP / `chrome://` / `file://` | default spy | “Not HTTPS — no certificate” |
 

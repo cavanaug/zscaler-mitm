@@ -19,7 +19,7 @@ export function iconKind(record) {
 export function statusLine(record) {
   if (!record || record.error === 'reload') return 'Reload the tab to inspect the certificate';
   if (record.error === 'not-https') return 'Not HTTPS — no certificate';
-  if (record.error === 'no-security-info') return 'Needs Chrome/Brave 144+';
+  if (record.error === 'no-security-info') return 'Needs Chromium 144+';
   if (record.error === 'parse') return 'Couldn’t parse certificate';
   if (record.zscaler) return 'Zscaler interception detected';
   return 'Issuer is not Zscaler';
