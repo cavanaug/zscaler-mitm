@@ -1,19 +1,127 @@
-export function isZscalerIssuer(issuer) {
-  if (!issuer) return false;
-  if (issuer.O === 'Zscaler Inc.') return true;
-  if (issuer.OU === 'Zscaler Inc.') return true;
-  if (typeof issuer.CN === 'string' && issuer.CN.startsWith('Zscaler Intermediate Root CA')) {
-    return true;
+export const EMPTY_PUBLIC_CAS = {
+  version: 1,
+  generatedAt: '',
+  source: '',
+  organizations: [],
+  issuerCNs: [],
+  rootSpkis: [],
+};
+
+function asStringArray(v) {
+  if (!Array.isArray(v)) return null;
+  const out = [];
+  for (const x of v) {
+    if (typeof x !== 'string') return null;
+    out.push(x);
+  }
+  return out;
+}
+
+export function parsePublicCas(input) {
+  let obj = input;
+  if (typeof input === 'string') {
+    try {
+      obj = JSON.parse(input);
+    } catch {
+      return null;
+    }
+  }
+  if (!obj || typeof obj !== 'object') return null;
+  const organizations = asStringArray(obj.organizations);
+  const issuerCNs = asStringArray(obj.issuerCNs);
+  const rootSpkis = asStringArray(obj.rootSpkis);
+  if (!organizations || !issuerCNs || !rootSpkis) return null;
+  return {
+    version: Number(obj.version) || 1,
+    generatedAt: typeof obj.generatedAt === 'string' ? obj.generatedAt : '',
+    source: typeof obj.source === 'string' ? obj.source : '',
+    organizations,
+    issuerCNs,
+    rootSpkis: rootSpkis.map((h) => h.toLowerCase()),
+  };
+}
+
+export function pickPublicCas(fetched, cached, packed) {
+  for (const x of [fetched, cached, packed]) {
+    const p = parsePublicCas(x);
+    if (p) return p;
+  }
+  return EMPTY_PUBLIC_CAS;
+}
+
+export function hostnameFromUrl(url) {
+  try {
+    return new URL(url).hostname.replace(/\.$/, '').toLowerCase();
+  } catch {
+    return '';
+  }
+}
+
+export function hostMatchesDns(host, dnsEntry) {
+  if (!host || !dnsEntry) return false;
+  const h = String(host).replace(/\.$/, '').toLowerCase();
+  const p = String(dnsEntry).replace(/^\.+/, '').replace(/\.$/, '').toLowerCase();
+  if (!p) return false;
+  return h === p || h.endsWith('.' + p);
+}
+
+export function isPublicIssuer(issuer, publicCas, chainSpkis) {
+  if (!issuer || !publicCas) return false;
+  if (issuer.O && publicCas.organizations.includes(issuer.O)) return true;
+  if (issuer.CN && publicCas.issuerCNs.includes(issuer.CN)) return true;
+  const roots = new Set(publicCas.rootSpkis);
+  for (const s of chainSpkis || []) {
+    if (roots.has(String(s).toLowerCase())) return true;
   }
   return false;
+}
+
+export function overlayForIssuer(issuer, overlays) {
+  if (!issuer || !Array.isArray(overlays)) return null;
+  for (const o of overlays) {
+    if (!o || o.O !== issuer.O) continue;
+    if (o.CN != null && o.CN !== issuer.CN) continue;
+    return o;
+  }
+  return null;
+}
+
+export function mergeOverlay(overlays, issuer, host) {
+  const list = Array.isArray(overlays) ? overlays.map((o) => ({ ...o, dns: [...(o.dns || [])] })) : [];
+  let hit = overlayForIssuer(issuer, list);
+  if (!hit) {
+    hit = { O: issuer.O, CN: null, dns: [] };
+    list.push(hit);
+  }
+  if (host && !hit.dns.some((d) => hostMatchesDns(host, d) && d.replace(/^\.+/, '') === host)) {
+    if (!hit.dns.includes(host)) hit.dns.push(host);
+  }
+  return list;
+}
+
+export function hostInConstraints(hostname, certNc, overlay) {
+  const permitted = [...(certNc && certNc.permitted ? certNc.permitted : []), ...(overlay && overlay.dns ? overlay.dns : [])];
+  const excluded = certNc && certNc.excluded ? certNc.excluded : [];
+  if (!permitted.length) return false;
+  if (excluded.some((d) => hostMatchesDns(hostname, d))) return false;
+  return permitted.some((d) => hostMatchesDns(hostname, d));
+}
+
+export function classify({ issuer, hostname, publicCas, overlays, chainSpkis, certNc }) {
+  if (isPublicIssuer(issuer, publicCas, chainSpkis)) return 'public';
+  const overlay = overlayForIssuer(issuer, overlays);
+  if (hostInConstraints(hostname, certNc, overlay)) return 'in-scope';
+  return 'intercept';
 }
 
 export function iconKind(record) {
   if (!record) return 'yellow';
   if (record.error === 'not-https') return 'default';
   if (record.error) return 'yellow';
-  if (record.zscaler) return 'red';
-  return 'default';
+  if (record.verdict === 'public') return 'green';
+  if (record.verdict === 'in-scope') return 'blue';
+  if (record.verdict === 'intercept') return 'red';
+  return 'yellow';
 }
 
 export function statusLine(record) {
@@ -21,8 +129,10 @@ export function statusLine(record) {
   if (record.error === 'not-https') return 'Not HTTPS — no certificate';
   if (record.error === 'no-security-info') return 'Needs Chromium 144+';
   if (record.error === 'parse') return 'Couldn’t parse certificate';
-  if (record.zscaler) return 'Zscaler interception detected';
-  return 'Issuer is not Zscaler';
+  if (record.verdict === 'public') return 'Public CA';
+  if (record.verdict === 'in-scope') return 'Private CA, in-scope';
+  if (record.verdict === 'intercept') return 'Unconstrained or off-scope intercepting CA';
+  return 'Reload the tab to inspect the certificate';
 }
 
 export function shouldKeepRecord(existing, url) {
