@@ -1,4 +1,4 @@
-import { iconKind, statusLine } from './cert.js';
+import { hostnameFromUrl, iconKind, mergeOverlay, statusLine } from './cert.js';
 
 function nameBlock(title, name) {
   const wrap = document.createElement('div');
@@ -76,4 +76,27 @@ if (record && record.error === null) {
       (meta.lastError ? ' err=' + meta.lastError : '');
   }
   fields.append(hint);
+}
+
+if (record && record.error === null && record.verdict !== 'public' && record.issuer) {
+  const allow = document.getElementById('allow');
+  const host = hostnameFromUrl(record.url);
+  allow.hidden = false;
+  allow.textContent = 'Allow this issuer for ' + host;
+  allow.addEventListener('click', async () => {
+    let overlays = [];
+    try {
+      overlays = (await chrome.storage.sync.get('overlays')).overlays || [];
+    } catch {
+      overlays = (await chrome.storage.local.get('overlays')).overlays || [];
+    }
+    const next = mergeOverlay(overlays, record.issuer, host);
+    try {
+      await chrome.storage.sync.set({ overlays: next });
+    } catch {
+      await chrome.storage.local.set({ overlays: next });
+    }
+    await chrome.runtime.sendMessage({ type: 'overlays-changed' });
+    location.reload();
+  });
 }

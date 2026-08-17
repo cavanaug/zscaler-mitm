@@ -7,6 +7,8 @@
   #status { font-weight: 600; margin-bottom: 10px; }
   #status.red { color: #c62828; }
   #status.yellow { color: #b8860b; }
+  #status.green { color: #1b5e20; }
+  #status.blue { color: #1565c0; }
   h2 { font-size: 12px; margin: 10px 0 4px; }
   dl { display: grid; grid-template-columns: 2.5em 1fr; gap: 2px 10px; margin: 0; }
   dt { color: #666; }
@@ -17,5 +19,6 @@
 <h1>Certificate</h1>
 <div id="status"></div>
 <div id="fields"></div>
+<button id="allow" type="button" hidden></button>
 <button id="grant" type="button" hidden>Allow on all HTTPS sites</button>
 <script type="module" src="popup.js"></script>
