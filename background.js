@@ -13,6 +13,7 @@ import {
 } from './cert.js';
 import { documentUrl, isOwnWebRequest, pickTabId, requestIsPageCert, shouldSkipCapture, storageOriginKey, storageOriginKeys } from './tab-match.js';
 import { loadOverlays } from './overlay-store.js';
+import { probeFetch } from './probe.js';
 
 const PUBLIC_CAS_URL = 'https://raw.githubusercontent.com/cavanaug/zscaler-mitm/master/public-cas.json';
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -395,21 +396,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       } else if (msg && msg.type === 'apply-icon' && typeof msg.tabId === 'number') {
         await applyIcon(msg.tabId);
       } else if (msg && msg.type === 'probe' && typeof msg.url === 'string') {
-        let target = msg.url;
-        try {
-          target = new URL(msg.url).origin + '/';
-        } catch {
-          // use as-is
-        }
-        try {
-          await fetch(target, { method: 'HEAD', cache: 'no-store', redirect: 'follow' });
-        } catch {
-          try {
-            await fetch(target, { method: 'GET', cache: 'no-store', redirect: 'follow' });
-          } catch {
-            // page may require cookies; user can reload
-          }
-        }
+        await probeFetch(msg.url);
       }
     } finally {
       sendResponse({ ok: true });

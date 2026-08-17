@@ -13,6 +13,7 @@ icons:
 	  for size in 16 32 48 128; do \
 	    convert icons/default-128.png -resize $${size}x$${size} \
 	      -alpha extract -background "$$fill" -alpha shape \
+	      -type TrueColorAlpha -define png:color-type=6 \
 	      icons/$${name}-$${size}.png; \
 	  done; \
 	done
