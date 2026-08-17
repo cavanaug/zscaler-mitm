@@ -32,8 +32,49 @@ test('parsePublicCas rejects junk and empty lists stay empty', () => {
   assert.equal(parsePublicCas(null), null);
   assert.equal(parsePublicCas('nope'), null);
   assert.equal(parsePublicCas({}), null);
+  const emptyValid = {
+    version: 1,
+    generatedAt: '',
+    source: '',
+    organizations: [],
+    issuerCNs: [],
+    rootSpkis: [],
+  };
+  assert.equal(parsePublicCas(emptyValid), null);
+  assert.equal(parsePublicCas(JSON.stringify(emptyValid)), null);
   assert.deepEqual(pickPublicCas('bad', null, null), EMPTY_PUBLIC_CAS);
-  assert.equal(pickPublicCas('bad', pub, EMPTY_PUBLIC_CAS).organizations[0], 'DigiCert Inc');
+  assert.deepEqual(pickPublicCas(emptyValid, emptyValid, emptyValid), EMPTY_PUBLIC_CAS);
+  const packed = parsePublicCas(readFileSync(join(dirname(fileURLToPath(import.meta.url)), '..', 'public-cas.json'), 'utf8'));
+  assert.ok(packed);
+  assert.ok(packed.organizations.length >= 50);
+  assert.equal(pickPublicCas('bad', pub, packed).organizations[0], packed.organizations[0]);
+  assert.equal(pickPublicCas(emptyValid, null, packed).organizations.length, packed.organizations.length);
+});
+
+test('classify: short issuer CN alone does not match public list', () => {
+  const cas = { ...pub, issuerCNs: ['WE2', 'DigiCert Global CA'] };
+  assert.equal(
+    classify({
+      issuer: { CN: 'WE2', O: 'Zscaler Inc.', OU: '' },
+      hostname: 'example.com',
+      publicCas: cas,
+      overlays: [],
+      chainSpkis: [],
+      certNc: null,
+    }),
+    'intercept',
+  );
+  assert.equal(
+    classify({
+      issuer: { CN: 'DigiCert Global CA', O: 'Not A Real CA', OU: '' },
+      hostname: 'example.com',
+      publicCas: cas,
+      overlays: [],
+      chainSpkis: [],
+      certNc: null,
+    }),
+    'public',
+  );
 });
 
 test('classify: public O / CN / SPKI', () => {
@@ -278,6 +319,51 @@ test('parseX509Names: subject O = Zscaler Inc. with DigiCert issuer does not mat
 test('parseX509Names: garbage throws', () => {
   assert.throws(() => parseX509Names(Uint8Array.of(0xff, 0x00, 0x01)));
   assert.throws(() => parseX509Names(new Uint8Array(0)));
+});
+
+/** Patch issuer-nc-hp.der: permitted NC has foo.com, unknown rfc822Name, bar.com */
+function ncFixtureWithUnknownTag() {
+  const base = loadDer('issuer-nc-hp.der');
+  let oidOff = 0;
+  while (oidOff < base.length - 4) {
+    if (
+      base[oidOff] === 0x06 &&
+      base[oidOff + 1] === 0x03 &&
+      base[oidOff + 2] === 0x55 &&
+      base[oidOff + 3] === 0x1d &&
+      base[oidOff + 4] === 0x1e
+    ) {
+      break;
+    }
+    oidOff++;
+  }
+  const octetOff = oidOff + 5;
+  const ncOff = octetOff + 2;
+  const oldNcLen = base[octetOff + 1];
+  const ncInner = Uint8Array.from([
+    0x30, 0x1a, 0xa0, 0x18, 0x30, 0x16, 0x82, 0x07, 0x66, 0x6f, 0x6f, 0x2e, 0x63, 0x6f, 0x6d, 0x81, 0x04,
+    0x74, 0x65, 0x73, 0x74, 0x82, 0x07, 0x62, 0x61, 0x72, 0x2e, 0x63, 0x6f, 0x6d,
+  ]);
+  const delta = ncInner.length - oldNcLen;
+  const out = new Uint8Array(base.length + delta);
+  out.set(base.subarray(0, ncOff), 0);
+  out.set(ncInner, ncOff);
+  out.set(base.subarray(ncOff + oldNcLen), ncOff + ncInner.length);
+  out[3] += delta;
+  out[7] += delta;
+  out[oidOff - 1] += delta;
+  out[octetOff + 1] = ncInner.length;
+  const a3Off = base.indexOf(0xa3, 400);
+  out[a3Off + 1] += delta;
+  out[a3Off + 3] += delta;
+  return out;
+}
+
+test('parseNameConstraints: skips unknown TLV and collects later DNS names', () => {
+  const nc = parseNameConstraints(ncFixtureWithUnknownTag());
+  assert.ok(nc);
+  assert.ok(nc.permitted.includes('foo.com'));
+  assert.ok(nc.permitted.includes('bar.com'));
 });
 
 test('parseNameConstraints: permitted .hp.com', () => {

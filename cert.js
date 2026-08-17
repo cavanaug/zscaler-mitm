@@ -31,6 +31,7 @@ export function parsePublicCas(input) {
   const issuerCNs = asStringArray(obj.issuerCNs);
   const rootSpkis = asStringArray(obj.rootSpkis);
   if (!organizations || !issuerCNs || !rootSpkis) return null;
+  if (organizations.length < 50) return null;
   return {
     version: Number(obj.version) || 1,
     generatedAt: typeof obj.generatedAt === 'string' ? obj.generatedAt : '',
@@ -68,7 +69,7 @@ export function hostMatchesDns(host, dnsEntry) {
 export function isPublicIssuer(issuer, publicCas, chainSpkis) {
   if (!issuer || !publicCas) return false;
   if (issuer.O && publicCas.organizations.includes(issuer.O)) return true;
-  if (issuer.CN && publicCas.issuerCNs.includes(issuer.CN)) return true;
+  if (issuer.CN && issuer.CN.length >= 8 && publicCas.issuerCNs.includes(issuer.CN)) return true;
   const roots = new Set(publicCas.rootSpkis);
   for (const s of chainSpkis || []) {
     if (roots.has(String(s).toLowerCase())) return true;
@@ -295,7 +296,8 @@ function collectDnsNames(buf, subtreesWrapper, out) {
         out.push(new TextDecoder('ascii').decode(buf.subarray(dns.start, dns.end)));
       }
     } else {
-      break;
+      const { len, i: next } = readLen(buf, i + 1);
+      i = next + len;
     }
   }
 }

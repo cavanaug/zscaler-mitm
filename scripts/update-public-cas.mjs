@@ -75,6 +75,11 @@ function add(set, value) {
   if (s) set.add(s);
 }
 
+function addIssuerCn(set, value) {
+  const s = String(value ?? '').trim();
+  if (s.length >= 8) set.add(s);
+}
+
 async function fetchText(url) {
   const res = await fetch(url);
   if (!res.ok) throw new Error(`fetch failed ${url}: ${res.status}`);
@@ -97,7 +102,7 @@ function processMozillaPem(rows, organizations, issuerCNs, rootSpkis) {
     if (!row['Trust Bits']?.includes('Websites')) continue;
     add(organizations, row.Owner);
     add(organizations, row['Certificate Issuer Organization']);
-    add(issuerCNs, row['Common Name or Certificate Name']);
+    addIssuerCn(issuerCNs, row['Common Name or Certificate Name']);
     const hash = spkiHash(row['PEM Info']);
     if (hash) rootSpkis.add(hash);
   }
@@ -115,7 +120,7 @@ function processV4a(rows, organizations, issuerCNs) {
   for (const row of rows) {
     if (!v4aIncluded(row)) continue;
     add(organizations, row['CA Owner']);
-    add(issuerCNs, row['Certificate Name']);
+    addIssuerCn(issuerCNs, row['Certificate Name']);
   }
 }
 
