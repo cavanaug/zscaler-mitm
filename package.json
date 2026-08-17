@@ -3,6 +3,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "test": "node --test"
+    "test": "node --test",
+    "update-public-cas": "node scripts/update-public-cas.mjs"
   }
 }
