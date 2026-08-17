@@ -56,6 +56,7 @@ function renderList(overlays) {
       const next = overlays.filter((x) => overlayKey(x) !== overlayKey(o));
       await saveOverlays(next);
       renderList(next);
+      overlays.splice(0, overlays.length, ...next);
     });
     li.append(meta, dns, del);
     list.append(li);
