@@ -300,19 +300,22 @@ chrome.permissions.onAdded.addListener((p) => {
 
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   const run = async () => {
-    if (msg && msg.type === 'overlays-changed') {
-      const tabs = await chrome.tabs.query({});
-      for (const tab of tabs) {
-        if (tab.id < 0) continue;
-        const rec = await load(tab.id);
-        if (!rec) continue;
-        await save(tab.id, await reclassifyRecord(rec));
-        await applyIcon(tab.id);
+    try {
+      if (msg && msg.type === 'overlays-changed') {
+        const tabs = await chrome.tabs.query({});
+        for (const tab of tabs) {
+          if (tab.id < 0) continue;
+          const rec = await load(tab.id);
+          if (!rec) continue;
+          await save(tab.id, await reclassifyRecord(rec));
+          await applyIcon(tab.id);
+        }
       }
+    } finally {
+      sendResponse({ ok: true });
     }
-    sendResponse({ ok: true });
   };
-  void run();
+  void run().catch(() => {});
   return true;
 });
 
