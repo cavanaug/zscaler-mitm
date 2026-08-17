@@ -18,10 +18,10 @@ icons:
 
 package: $(ZIP)
 
-$(ZIP): manifest.json background.js cert.js popup.html popup.js $(wildcard icons/*.png)
+$(ZIP): manifest.json background.js cert.js popup.html popup.js options.html options.js public-cas.json $(wildcard icons/*.png)
 	rm -rf $(STAGE) $(ZIP)
 	mkdir -p $(STAGE)
-	cp manifest.json background.js cert.js popup.html popup.js $(STAGE)/
+	cp manifest.json background.js cert.js popup.html popup.js options.html options.js public-cas.json $(STAGE)/
 	cp -r icons $(STAGE)/icons
 	cd $(DIST) && zip -r $(NAME).zip $(NAME)
 	@echo Wrote $(ZIP)

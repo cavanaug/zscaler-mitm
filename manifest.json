@@ -1,26 +1,29 @@
 {
   "manifest_version": 3,
   "name": "Zscaler MITM",
-  "version": "1.0.0",
-  "description": "Toolbar warning when the current tab’s TLS cert is issued by Zscaler.",
+  "version": "1.1.0",
+  "description": "Toolbar signal when the tab’s TLS issuer is a public CA, a constrained private CA, or an unconstrained intercepting CA.",
   "icons": {
     "16": "icons/default-16.png",
     "48": "icons/default-48.png",
     "128": "icons/default-128.png"
   },
   "action": {
-    "default_title": "Zscaler MITM",
+    "default_title": "TLS issuer",
     "default_popup": "popup.html",
     "default_icon": {
       "16": "icons/default-16.png",
       "32": "icons/default-32.png"
     }
   },
+  "options_page": "options.html",
   "background": {
     "service_worker": "background.js",
     "type": "module"
   },
   "permissions": ["webRequest", "storage", "tabs"],
-  "host_permissions": ["https://*/*"],
-  "optional_host_permissions": ["https://*/*"]
+  "host_permissions": [
+    "https://*/*",
+    "https://raw.githubusercontent.com/cavanaug/zscaler-mitm/*"
+  ]
 }

@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<meta charset="utf-8">
+<title>Zscaler MITM — Options</title>
+<style>
+  body { font: 13px/1.4 system-ui, sans-serif; margin: 16px; max-width: 640px; color: #111; }
+  h1 { font-size: 16px; margin: 0 0 12px; }
+  h2 { font-size: 13px; margin: 16px 0 8px; }
+  ul { list-style: none; padding: 0; margin: 0; }
+  li { border: 1px solid #ddd; border-radius: 4px; padding: 8px 10px; margin-bottom: 8px; }
+  li .meta { margin-bottom: 6px; }
+  li .dns { color: #333; word-break: break-all; }
+  li button { margin-top: 6px; }
+  form { display: grid; gap: 8px; margin-top: 8px; }
+  label { display: grid; gap: 4px; }
+  input { font: inherit; padding: 4px 6px; }
+  footer { margin-top: 20px; padding-top: 12px; border-top: 1px solid #ddd; color: #666; font-size: 12px; }
+  #empty { color: #666; font-style: italic; }
+</style>
+<h1>Issuer DNS overlays</h1>
+<p>Permitted DNS names for non-public certificate issuers. Matching hostnames classify as in-scope (blue).</p>
+<ul id="list"></ul>
+<p id="empty" hidden>No overlays yet.</p>
+<h2>Add overlay</h2>
+<form id="add">
+  <label>Organization (O)
+    <input id="o" name="o" required autocomplete="off">
+  </label>
+  <label>Common name (CN, optional)
+    <input id="cn" name="cn" autocomplete="off">
+  </label>
+  <label>DNS names (comma-separated)
+    <input id="dns" name="dns" required autocomplete="off" placeholder="example.com, .example.com">
+  </label>
+  <button type="submit">Add</button>
+</form>
+<footer>
+  <div id="generated-at"></div>
+  <div id="last-refresh"></div>
+</footer>
+<script type="module" src="options.js"></script>
