@@ -1,14 +1,78 @@
-import { iconKind, isZscalerIssuer, parseX509Names, shouldKeepRecord } from './cert.js';
+import publicCasPacked from './public-cas.json' with { type: 'json' };
+import {
+  classify,
+  hostnameFromUrl,
+  iconKind,
+  parseNameConstraints,
+  parseSpkiDer,
+  parsePublicCas,
+  pickPublicCas,
+  parseX509Names,
+  shouldKeepRecord,
+} from './cert.js';
+
+const PUBLIC_CAS_URL = 'https://raw.githubusercontent.com/cavanaug/zscaler-mitm/master/public-cas.json';
+const DAY_MS = 24 * 60 * 60 * 1000;
 
 const ICONS = {
   default: { 16: 'icons/default-16.png', 32: 'icons/default-32.png' },
   yellow: { 16: 'icons/yellow-16.png', 32: 'icons/yellow-32.png' },
+  green: { 16: 'icons/green-16.png', 32: 'icons/green-32.png' },
+  blue: { 16: 'icons/blue-16.png', 32: 'icons/blue-32.png' },
   red: { 16: 'icons/red-16.png', 32: 'icons/red-32.png' },
 };
 
 const META = 'meta:wr';
 let attachedSpec = null;
 let attachError = '';
+
+async function sha256Hex(bytes) {
+  const hash = await crypto.subtle.digest('SHA-256', bytes);
+  return [...new Uint8Array(hash)].map((b) => b.toString(16).padStart(2, '0')).join('');
+}
+
+async function loadOverlays() {
+  try {
+    const got = await chrome.storage.sync.get('overlays');
+    if (Array.isArray(got.overlays)) return got.overlays;
+  } catch {
+    // sync unavailable
+  }
+  const got = await chrome.storage.local.get('overlays');
+  return Array.isArray(got.overlays) ? got.overlays : [];
+}
+
+export async function saveOverlays(overlays) {
+  try {
+    await chrome.storage.sync.set({ overlays });
+  } catch {
+    await chrome.storage.local.set({ overlays });
+  }
+}
+
+async function currentPublicCas() {
+  const got = await chrome.storage.local.get(['publicCas', 'publicCasFetchedAt']);
+  return pickPublicCas(got.publicCas, null, publicCasPacked);
+}
+
+async function refreshPublicCas(force) {
+  try {
+    const got = await chrome.storage.local.get('publicCasFetchedAt');
+    if (!force && typeof got.publicCasFetchedAt === 'number' && Date.now() - got.publicCasFetchedAt < DAY_MS) {
+      return;
+    }
+    const res = await fetch(PUBLIC_CAS_URL, { cache: 'no-store' });
+    if (!res.ok) return;
+    const text = await res.text();
+    const parsed = parsePublicCas(text);
+    if (!parsed) return;
+    await chrome.storage.local.set({ publicCas: parsed, publicCasFetchedAt: Date.now() });
+  } catch {
+    // keep last good / packed
+  }
+}
+
+void refreshPublicCas(false);
 
 function tabKey(tabId) {
   return 'tab:' + tabId;
@@ -45,7 +109,7 @@ function classifyUrl(url) {
 }
 
 function blank(url, error) {
-  return { url: url || '', subject: null, issuer: null, zscaler: false, error };
+  return { url: url || '', subject: null, issuer: null, verdict: null, certNc: null, error };
 }
 
 async function writeMeta(extra) {
@@ -93,7 +157,7 @@ function leafRawDer(si) {
   return { der, why: null };
 }
 
-function recordFromDetails(details) {
+async function recordFromDetails(details) {
   const si = details.securityInfo;
   if (!si) return blank(details.url, 'no-security-info');
   const { der, why } = leafRawDer(si);
@@ -103,20 +167,65 @@ function recordFromDetails(details) {
     return rec;
   }
   const names = parseX509Names(der);
+  const certs = Array.isArray(si.certificates) ? si.certificates : [];
+  const chainSpkis = [];
+  for (const c of certs) {
+    const raw = c && (c.rawDER ?? c.rawDer ?? c.raw_der);
+    if (raw == null) continue;
+    try {
+      chainSpkis.push(await sha256Hex(parseSpkiDer(raw)));
+    } catch {
+      // skip
+    }
+  }
+  let certNc = null;
+  const issuerCert = certs[1];
+  const issuerDer = issuerCert && (issuerCert.rawDER ?? issuerCert.rawDer ?? issuerCert.raw_der);
+  if (issuerDer != null) {
+    try {
+      certNc = parseNameConstraints(issuerDer);
+    } catch {
+      certNc = null;
+    }
+  }
+  const publicCas = await currentPublicCas();
+  const overlays = await loadOverlays();
+  const verdict = classify({
+    issuer: names.issuer,
+    hostname: hostnameFromUrl(details.url),
+    publicCas,
+    overlays,
+    chainSpkis,
+    certNc,
+  });
   return {
     url: details.url,
     subject: names.subject,
     issuer: names.issuer,
-    zscaler: isZscalerIssuer(names.issuer),
+    verdict,
+    certNc,
     error: null,
   };
+}
+
+async function reclassifyRecord(record) {
+  if (!record || record.error !== null || !record.issuer) return record;
+  const verdict = classify({
+    issuer: record.issuer,
+    hostname: hostnameFromUrl(record.url),
+    publicCas: await currentPublicCas(),
+    overlays: await loadOverlays(),
+    chainSpkis: [],
+    certNc: record.certNc,
+  });
+  return { ...record, verdict };
 }
 
 function onHeadersReceived(details) {
   const run = async () => {
     let record;
     try {
-      record = recordFromDetails(details);
+      record = await recordFromDetails(details);
     } catch (e) {
       record = blank(details.url, 'parse');
       record.detail = String(e && e.message ? e.message : e);
@@ -187,6 +296,24 @@ void writeMeta({}).catch(() => {});
 
 chrome.permissions.onAdded.addListener((p) => {
   if (p.origins && p.origins.length) chrome.runtime.reload();
+});
+
+chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+  const run = async () => {
+    if (msg && msg.type === 'overlays-changed') {
+      const tabs = await chrome.tabs.query({});
+      for (const tab of tabs) {
+        if (tab.id < 0) continue;
+        const rec = await load(tab.id);
+        if (!rec) continue;
+        await save(tab.id, await reclassifyRecord(rec));
+        await applyIcon(tab.id);
+      }
+    }
+    sendResponse({ ok: true });
+  };
+  void run();
+  return true;
 });
 
 chrome.tabs.onUpdated.addListener(async (tabId, info, tab) => {
