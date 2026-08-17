@@ -51,8 +51,17 @@ test('parsePublicCas rejects junk and empty lists stay empty', () => {
   const packed = parsePublicCas(readFileSync(join(dirname(fileURLToPath(import.meta.url)), '..', 'public-cas.json'), 'utf8'));
   assert.ok(packed);
   assert.ok(packed.organizations.length >= 50);
+  assert.ok(packed.organizations.includes("Let's Encrypt"));
   assert.equal(pickPublicCas('bad', pub, packed).organizations[0], packed.organizations[0]);
   assert.equal(pickPublicCas(emptyValid, null, packed).organizations.length, packed.organizations.length);
+  const stale = {
+    ...packed,
+    generatedAt: '2020-01-01T00:00:00.000Z',
+    organizations: packed.organizations.filter((o) => o !== "Let's Encrypt"),
+  };
+  assert.ok(stale.organizations.length >= 50);
+  assert.equal(stale.organizations.includes("Let's Encrypt"), false);
+  assert.ok(pickPublicCas(stale, null, packed).organizations.includes("Let's Encrypt"));
 });
 
 test('classify: short issuer CN alone does not match public list', () => {
@@ -73,6 +82,21 @@ test('classify: short issuer CN alone does not match public list', () => {
       issuer: { CN: 'DigiCert Global CA', O: 'Not A Real CA', OU: '' },
       hostname: 'example.com',
       publicCas: cas,
+      overlays: [],
+      chainSpkis: [],
+      certNc: null,
+    }),
+    'public',
+  );
+});
+
+test('classify: packed list treats Let\'s Encrypt leaf as public', () => {
+  const packed = parsePublicCas(readFileSync(join(dirname(fileURLToPath(import.meta.url)), '..', 'public-cas.json'), 'utf8'));
+  assert.equal(
+    classify({
+      issuer: { CN: 'R10', O: "Let's Encrypt", OU: '' },
+      hostname: 'example.com',
+      publicCas: packed,
       overlays: [],
       chainSpkis: [],
       certNc: null,

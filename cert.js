@@ -43,11 +43,13 @@ export function parsePublicCas(input) {
 }
 
 export function pickPublicCas(fetched, cached, packed) {
+  let best = null;
   for (const x of [fetched, cached, packed]) {
     const p = parsePublicCas(x);
-    if (p) return p;
+    if (!p) continue;
+    if (!best || p.generatedAt > best.generatedAt) best = p;
   }
-  return EMPTY_PUBLIC_CAS;
+  return best || EMPTY_PUBLIC_CAS;
 }
 
 export function hostnameFromUrl(url) {

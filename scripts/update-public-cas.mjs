@@ -124,6 +124,12 @@ function processV4a(rows, organizations, issuerCNs) {
   }
 }
 
+function addKnownOrgAliases(organizations) {
+  if ([...organizations].some((o) => /internet security research group/i.test(o))) {
+    add(organizations, "Let's Encrypt");
+  }
+}
+
 async function main() {
   const [mozillaText, v4aText] = await Promise.all([fetchText(MOZILLA_PEM_URL), fetchText(V4A_URL)]);
 
@@ -133,6 +139,7 @@ async function main() {
 
   processMozillaPem(rowsToObjects(parseCsv(mozillaText)), organizations, issuerCNs, rootSpkis);
   processV4a(rowsToObjects(parseCsv(v4aText)), organizations, issuerCNs);
+  addKnownOrgAliases(organizations);
 
   const orgList = [...organizations].sort();
   if (orgList.length < 50) {
