@@ -5,12 +5,13 @@ ZIP := $(DIST)/$(NAME).zip
 
 .PHONY: package test clean icons
 
-# Regenerate green/blue toolbar tints from icons/source-spy.png
+# Tint from default-128 so every color uses the same toolbar glyph
+# (source-spy.png is padded; resizing it shrinks the spy vs yellow/red).
 icons:
-	for color in green:'#1b5e20' blue:'#1565c0'; do \
+	for color in green:'#43a047' blue:'#1565c0'; do \
 	  name=$${color%%:*}; fill=$${color#*:}; \
 	  for size in 16 32 48 128; do \
-	    convert icons/source-spy.png -resize $${size}x$${size} \
+	    convert icons/default-128.png -resize $${size}x$${size} \
 	      -alpha extract -background "$$fill" -alpha shape \
 	      icons/$${name}-$${size}.png; \
 	  done; \
@@ -18,10 +19,10 @@ icons:
 
 package: $(ZIP)
 
-$(ZIP): manifest.json background.js cert.js popup.html popup.js options.html options.js public-cas.json $(wildcard icons/*.png)
+$(ZIP): manifest.json background.js cert.js tab-match.js debug.js overlay-store.js popup.html popup.js options.html options.js public-cas.json $(wildcard icons/*.png)
 	rm -rf $(STAGE) $(ZIP)
 	mkdir -p $(STAGE)
-	cp manifest.json background.js cert.js popup.html popup.js options.html options.js public-cas.json $(STAGE)/
+	cp manifest.json background.js cert.js tab-match.js debug.js overlay-store.js popup.html popup.js options.html options.js public-cas.json $(STAGE)/
 	cp -r icons $(STAGE)/icons
 	cd $(DIST) && zip -r $(NAME).zip $(NAME)
 	@echo Wrote $(ZIP)

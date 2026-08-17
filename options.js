@@ -1,25 +1,6 @@
 import publicCasPacked from './public-cas.json' with { type: 'json' };
 import { pickPublicCas } from './cert.js';
-
-async function loadOverlays() {
-  try {
-    const got = await chrome.storage.sync.get('overlays');
-    if (Array.isArray(got.overlays)) return got.overlays;
-  } catch {
-    // sync unavailable
-  }
-  const got = await chrome.storage.local.get('overlays');
-  return Array.isArray(got.overlays) ? got.overlays : [];
-}
-
-async function saveOverlays(overlays) {
-  try {
-    await chrome.storage.sync.set({ overlays });
-  } catch {
-    await chrome.storage.local.set({ overlays });
-  }
-  await chrome.runtime.sendMessage({ type: 'overlays-changed' });
-}
+import { loadOverlays, saveOverlays } from './overlay-store.js';
 
 function parseDnsInput(text) {
   return text
@@ -64,6 +45,7 @@ function renderList(items) {
 async function applyOverlays(next) {
   overlays = next;
   await saveOverlays(overlays);
+  await chrome.runtime.sendMessage({ type: 'overlays-changed' });
   renderList(overlays);
 }
 

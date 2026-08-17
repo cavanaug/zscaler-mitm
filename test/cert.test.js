@@ -6,15 +6,19 @@ import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 import {
   classify,
+  certFitsTab,
   EMPTY_PUBLIC_CAS,
   hostMatchesDns,
   iconKind,
   mergeOverlay,
+  overlayDnsHasHost,
+  removeOverlayHost,
   parseNameConstraints,
   parsePublicCas,
   parseSpkiDer,
   parseX509Names,
   pickPublicCas,
+  shouldKeepOnComplete,
   shouldKeepRecord,
   statusLine,
 } from '../cert.js';
@@ -100,6 +104,18 @@ test('classify: public O / CN / SPKI', () => {
     }),
     'public',
   );
+  const llc = { ...pub, organizations: ['Google Trust Services LLC'] };
+  assert.equal(
+    classify({
+      issuer: { CN: 'WE2', O: 'Google Trust Services', OU: '' },
+      hostname: 'www.google.com',
+      publicCas: llc,
+      overlays: [],
+      chainSpkis: [],
+      certNc: null,
+    }),
+    'public',
+  );
   assert.equal(
     classify({
       issuer: { CN: 'Unknown Inter', O: 'Unknown Org', OU: '' },
@@ -125,6 +141,26 @@ test('classify: unconstrained alternate is intercept even with empty public list
       certNc: null,
     }),
     'intercept',
+  );
+});
+
+test('classify: HP DigitalBadge overlay for content.int.hp.com', () => {
+  const issuer = {
+    CN: 'HP Inc Private SSL Intermediate CA',
+    O: 'HP Global PKI Services',
+    OU: 'HP DigitalBadge PKI',
+  };
+  const overlays = mergeOverlay([], issuer, 'content.int.hp.com');
+  assert.equal(
+    classify({
+      issuer,
+      hostname: 'content.int.hp.com',
+      publicCas: EMPTY_PUBLIC_CAS,
+      overlays,
+      chainSpkis: [],
+      certNc: null,
+    }),
+    'in-scope',
   );
 });
 
@@ -183,6 +219,18 @@ test('mergeOverlay adds host', () => {
   assert.equal(next.length, 1);
   assert.equal(next[0].O, 'HP Inc');
   assert.deepEqual(next[0].dns, ['www.hp.com']);
+  assert.equal(overlayDnsHasHost(next[0], 'www.hp.com'), true);
+  assert.equal(overlayDnsHasHost(next[0], 'other.hp.com'), false);
+});
+
+test('removeOverlayHost drops exact host and empty overlay', () => {
+  const issuer = { CN: 'HP', O: 'HP Inc', OU: '' };
+  const added = mergeOverlay([], issuer, 'content.int.hp.com');
+  const gone = removeOverlayHost(added, issuer, 'content.int.hp.com');
+  assert.equal(gone.length, 0);
+  const two = mergeOverlay(mergeOverlay([], issuer, 'a.hp.com'), issuer, 'b.hp.com');
+  const one = removeOverlayHost(two, issuer, 'a.hp.com');
+  assert.deepEqual(one[0].dns, ['b.hp.com']);
 });
 
 test('iconKind + statusLine table', () => {
@@ -235,6 +283,14 @@ test('iconKind + statusLine table', () => {
   assert.equal(statusLine(scoped), 'Private CA, in-scope');
 });
 
+test('certFitsTab: sibling HP enterprise hosts share a 3-label suffix', () => {
+  assert.equal(
+    certFitsTab('https://static.azc.ext.hp.com/x', 'https://github.azc.ext.hp.com/x'),
+    true,
+  );
+  assert.equal(certFitsTab('https://github.githubassets.com/x', 'https://github.com/settings/copilot/features'), false);
+});
+
 test('shouldKeepRecord: keep parsed cert on same origin URL change', () => {
   const rec = {
     url: 'https://example.com/',
@@ -246,10 +302,24 @@ test('shouldKeepRecord: keep parsed cert on same origin URL change', () => {
   assert.equal(shouldKeepRecord(rec, 'https://example.com/'), true);
   assert.equal(shouldKeepRecord(rec, 'https://example.com/index.html'), true);
   assert.equal(shouldKeepRecord(rec, 'https://other.example/'), false);
+  const cdn = {
+    ...rec,
+    url: 'https://static.azc.ext.hp.com/asset.js',
+    pageUrl: 'https://github.azc.ext.hp.com/stratus/hpdevbox/issues',
+  };
+  assert.equal(shouldKeepRecord(cdn, 'https://github.azc.ext.hp.com/stratus/hpdevbox/issues'), true);
+  assert.equal(shouldKeepRecord(cdn, 'https://gitlab.azc.ext.hp.com/other'), false);
+  assert.equal(
+    shouldKeepOnComplete(
+      { ...cdn, pageUrl: cdn.url },
+      'https://github-partner.azc.ext.hp.com/jedi/harvester_crawler/pull/2844',
+    ),
+    true,
+  );
   assert.equal(shouldKeepRecord(null, 'https://example.com/'), false);
   const reload = { url: 'https://example.com/a', subject: null, issuer: null, verdict: null, error: 'reload' };
   assert.equal(shouldKeepRecord(reload, 'https://example.com/b'), false);
-  assert.equal(shouldKeepRecord(reload, 'https://example.com/a'), true);
+  assert.equal(shouldKeepRecord(reload, 'https://example.com/a'), false);
   const missing = {
     url: 'https://example.com/',
     subject: null,

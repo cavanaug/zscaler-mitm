@@ -1,6 +1,6 @@
 # Zscaler MITM
 
-Toolbar icon that classifies the active tab’s TLS issuer: **dark green** for a public CA, **blue** for a constrained private CA on an allowed host, **red** for an unconstrained or off-scope intercepting CA, **yellow** when the certificate is not yet available, and **grey** on non-HTTPS pages. Click the icon to see subject and issuer CN / O / OU and the verdict line.
+Toolbar icon that classifies the active tab’s TLS issuer: **green** for a public CA, **blue** for a constrained private CA on an allowed host, **red** for an unconstrained or off-scope intercepting CA, **yellow** when the certificate is not yet available, and **grey** on non-HTTPS pages. Click the icon to see subject and issuer CN / O / OU and the verdict line.
 
 Requires Chrome, Brave, or Edge with Chromium **144+** and the **WebRequestSecurityInfo** flag enabled (`webRequest` `securityInfoRawDer`). The API is still off by default.
 
@@ -23,7 +23,7 @@ No extra packages. Parser + match tests only; they do not launch a browser.
 
 ## Manual smoke checklist
 
-- [ ] Public HTTPS site (`example.com`) — dark green spy; popup “Public CA”
+- [ ] Public HTTPS site (`example.com`) — green spy; popup “Public CA”
 - [ ] Zscaler-intercepted HTTPS — red; “Unconstrained or off-scope intercepting CA”
 - [ ] After Allow on an HP (or other private) host — blue on that host; red on Gmail with that issuer
 - [ ] `chrome://` or `http://` — grey; “Not HTTPS — no certificate”

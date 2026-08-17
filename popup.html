@@ -2,23 +2,35 @@
 <meta charset="utf-8">
 <title>Zscaler MITM</title>
 <style>
-  body { font: 13px/1.4 system-ui, sans-serif; margin: 12px; min-width: 280px; color: #111; }
+  body { font: 13px/1.4 system-ui, sans-serif; margin: 12px; min-width: 300px; color: #111; }
   h1 { font-size: 14px; margin: 0 0 8px; }
   #status { font-weight: 600; margin-bottom: 10px; }
   #status.red { color: #c62828; }
   #status.yellow { color: #b8860b; }
-  #status.green { color: #1b5e20; }
+  #status.green { color: #43a047; }
   #status.blue { color: #1565c0; }
   h2 { font-size: 12px; margin: 10px 0 4px; }
   dl { display: grid; grid-template-columns: 2.5em 1fr; gap: 2px 10px; margin: 0; }
   dt { color: #666; }
   dd { margin: 0; word-break: break-all; }
   #hint { color: #666; font-size: 12px; max-width: 280px; }
-  #grant { margin-top: 8px; }
+  #grant, #allow, #recapture { margin-top: 8px; }
+  #debug {
+    margin-top: 12px;
+    padding-top: 8px;
+    border-top: 1px solid #ddd;
+    font: 11px/1.35 ui-monospace, SFMono-Regular, Menlo, monospace;
+    color: #555;
+    max-width: 320px;
+    white-space: pre-wrap;
+    word-break: break-all;
+  }
 </style>
 <h1>Certificate</h1>
 <div id="status"></div>
 <div id="fields"></div>
 <button id="allow" type="button" hidden></button>
 <button id="grant" type="button" hidden>Allow on all HTTPS sites</button>
+<button id="recapture" type="button" hidden>Reload page to capture</button>
+<pre id="debug"></pre>
 <script type="module" src="popup.js"></script>

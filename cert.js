@@ -68,13 +68,30 @@ export function hostMatchesDns(host, dnsEntry) {
 
 export function isPublicIssuer(issuer, publicCas, chainSpkis) {
   if (!issuer || !publicCas) return false;
-  if (issuer.O && publicCas.organizations.includes(issuer.O)) return true;
+  if (issuer.O && orgInList(issuer.O, publicCas.organizations)) return true;
   if (issuer.CN && issuer.CN.length >= 8 && publicCas.issuerCNs.includes(issuer.CN)) return true;
   const roots = new Set(publicCas.rootSpkis);
   for (const s of chainSpkis || []) {
     if (roots.has(String(s).toLowerCase())) return true;
   }
   return false;
+}
+
+function normOrg(s) {
+  return String(s || '')
+    .toLowerCase()
+    .replace(/[.,]/g, ' ')
+    .replace(/\b(llc|inc|ltd|corp|corporation|incorporated|limited|gmbh|co)\b/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function orgInList(o, organizations) {
+  if (!o || !Array.isArray(organizations)) return false;
+  if (organizations.includes(o)) return true;
+  const n = normOrg(o);
+  if (!n) return false;
+  return organizations.some((x) => normOrg(x) === n);
 }
 
 export function overlayForIssuer(issuer, overlays) {
@@ -87,6 +104,16 @@ export function overlayForIssuer(issuer, overlays) {
   return null;
 }
 
+function normHost(h) {
+  return String(h || '').replace(/^\.+/, '').replace(/\.$/, '').toLowerCase();
+}
+
+export function overlayDnsHasHost(overlay, host) {
+  if (!overlay || !host) return false;
+  const h = normHost(host);
+  return (overlay.dns || []).some((d) => normHost(d) === h);
+}
+
 export function mergeOverlay(overlays, issuer, host) {
   const list = Array.isArray(overlays) ? overlays.map((o) => ({ ...o, dns: [...(o.dns || [])] })) : [];
   let hit = overlayForIssuer(issuer, list);
@@ -97,6 +124,16 @@ export function mergeOverlay(overlays, issuer, host) {
   if (host && !hit.dns.some((d) => hostMatchesDns(host, d) && d.replace(/^\.+/, '') === host)) {
     if (!hit.dns.includes(host)) hit.dns.push(host);
   }
+  return list;
+}
+
+export function removeOverlayHost(overlays, issuer, host) {
+  const list = Array.isArray(overlays) ? overlays.map((o) => ({ ...o, dns: [...(o.dns || [])] })) : [];
+  const hit = overlayForIssuer(issuer, list);
+  if (!hit || !host) return list;
+  const h = normHost(host);
+  hit.dns = hit.dns.filter((d) => normHost(d) !== h);
+  if (!hit.dns.length) return list.filter((o) => o !== hit);
   return list;
 }
 
@@ -136,18 +173,57 @@ export function statusLine(record) {
   return 'Reload the tab to inspect the certificate';
 }
 
-export function shouldKeepRecord(existing, url) {
-  if (!existing) return false;
-  if (existing.url === url) return true;
-  // ponytail: keep parse/no-si/success across same-origin slash/redirect; only 'reload' is a placeholder
-  if (existing.error === 'reload') return false;
+export function relatedHost(a, b) {
+  if (!a || !b) return false;
+  if (a === b) return true;
+  if (a.endsWith('.' + b) || b.endsWith('.' + a)) return true;
+  const as = a.split('.');
+  const bs = b.split('.');
+  // ponytail: 3-label suffix (azc.ext.hp.com), not a PSL
+  if (as.length >= 3 && bs.length >= 3) {
+    return as.slice(-3).join('.') === bs.slice(-3).join('.');
+  }
+  return false;
+}
+
+export function certFitsTab(certUrl, tabUrl) {
+  if (!certUrl) return false;
+  if (!tabUrl) return true;
   try {
-    const a = new URL(existing.url);
-    const b = new URL(url);
-    return a.protocol === 'https:' && b.protocol === 'https:' && a.origin === b.origin;
+    const c = new URL(certUrl);
+    const t = new URL(tabUrl);
+    if (c.protocol !== t.protocol) return false;
+    if (c.origin === t.origin) return true;
+    return relatedHost(c.hostname, t.hostname);
   } catch {
     return false;
   }
+}
+
+export function sameHttpsOrigin(a, b) {
+  try {
+    const ua = new URL(a);
+    const ub = new URL(b);
+    return ua.protocol === 'https:' && ub.protocol === 'https:' && ua.origin === ub.origin;
+  } catch {
+    return false;
+  }
+}
+
+export function shouldKeepRecord(existing, url) {
+  if (!existing) return false;
+  // never keep the reload placeholder — it trapped tabs when tabId was -1
+  if (existing.error === 'reload') return false;
+  if (existing.error === 'not-https') return false;
+  // pageUrl is the tab document; record.url may be a CDN hop
+  return sameHttpsOrigin(existing.pageUrl || existing.url, url);
+}
+
+export function shouldKeepOnComplete(existing, url) {
+  if (!existing || existing.error !== null) return false;
+  if (shouldKeepRecord(existing, url)) return true;
+  // CDN hop: don't wipe a parsed cert when status=complete reports the document URL
+  return certFitsTab(existing.url, url);
 }
 
 function readLen(buf, i) {

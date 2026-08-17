@@ -8,8 +8,11 @@ import {
   parsePublicCas,
   pickPublicCas,
   parseX509Names,
+  shouldKeepOnComplete,
   shouldKeepRecord,
 } from './cert.js';
+import { documentUrl, isOwnWebRequest, pickTabId, requestIsPageCert, shouldSkipCapture, storageOriginKey, storageOriginKeys } from './tab-match.js';
+import { loadOverlays } from './overlay-store.js';
 
 const PUBLIC_CAS_URL = 'https://raw.githubusercontent.com/cavanaug/zscaler-mitm/master/public-cas.json';
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -23,31 +26,13 @@ const ICONS = {
 };
 
 const META = 'meta:wr';
+const tabHint = new Map();
 let attachedSpec = null;
 let attachError = '';
 
 async function sha256Hex(bytes) {
   const hash = await crypto.subtle.digest('SHA-256', bytes);
   return [...new Uint8Array(hash)].map((b) => b.toString(16).padStart(2, '0')).join('');
-}
-
-async function loadOverlays() {
-  try {
-    const got = await chrome.storage.sync.get('overlays');
-    if (Array.isArray(got.overlays)) return got.overlays;
-  } catch {
-    // sync unavailable
-  }
-  const got = await chrome.storage.local.get('overlays');
-  return Array.isArray(got.overlays) ? got.overlays : [];
-}
-
-export async function saveOverlays(overlays) {
-  try {
-    await chrome.storage.sync.set({ overlays });
-  } catch {
-    await chrome.storage.local.set({ overlays });
-  }
 }
 
 async function currentPublicCas() {
@@ -79,21 +64,57 @@ function tabKey(tabId) {
 }
 
 async function save(tabId, record) {
-  await chrome.storage.session.set({ [tabKey(tabId)]: record });
+  const payload = {};
+  if (tabId >= 0) payload[tabKey(tabId)] = record;
+  if (record && record.error === null) {
+    if (tabId >= 0) payload['ok:' + tabId] = record;
+    for (const k of storageOriginKeys(record.pageUrl, record.url)) payload[k] = record;
+  }
+  if (Object.keys(payload).length) await chrome.storage.session.set(payload);
+}
+
+async function persistSuccess(record) {
+  if (!record || record.error !== null) return;
+  const payload = {};
+  for (const k of storageOriginKeys(record.pageUrl, record.url)) payload[k] = record;
+  if (Object.keys(payload).length) await chrome.storage.session.set(payload);
 }
 
 async function load(tabId) {
-  const key = tabKey(tabId);
-  const got = await chrome.storage.session.get(key);
-  return got[key] ?? null;
+  const keys = [tabKey(tabId), 'ok:' + tabId];
+  let tabUrl = tabHint.get(tabId) || '';
+  if (!tabUrl) {
+    try {
+      tabUrl = (await chrome.tabs.get(tabId)).url || '';
+    } catch {
+      // tab gone
+    }
+  }
+  const originK = storageOriginKey(tabUrl);
+  if (originK) keys.push(originK);
+  const got = await chrome.storage.session.get(keys);
+  const rec = got[tabKey(tabId)];
+  const ok = got['ok:' + tabId];
+  const byOrigin = originK ? got[originK] : null;
+  if (rec && rec.error === null) return rec;
+  if (ok && ok.error === null) return ok;
+  if (byOrigin && byOrigin.error === null) return byOrigin;
+  return rec ?? null;
 }
 
 async function applyIcon(tabId) {
   const record = await load(tabId);
+  const path = ICONS[iconKind(record)];
   try {
-    await chrome.action.setIcon({ tabId, path: ICONS[iconKind(record)] });
+    await chrome.action.setIcon({ tabId, path });
   } catch {
     // tab closed
+  }
+  try {
+    const active = await resolveActiveTab();
+    if (active && active.id === tabId) await chrome.action.setIcon({ path });
+  } catch {
+    // no focused window
   }
 }
 
@@ -109,7 +130,7 @@ function classifyUrl(url) {
 }
 
 function blank(url, error) {
-  return { url: url || '', subject: null, issuer: null, verdict: null, certNc: null, error };
+  return { url: url || '', pageUrl: url || '', subject: null, issuer: null, verdict: null, certNc: null, error };
 }
 
 async function writeMeta(extra) {
@@ -126,24 +147,68 @@ async function writeMeta(extra) {
 
 async function ensureRecord(tabId, url) {
   const existing = await load(tabId);
+  if (classifyUrl(url) === 'not-https') {
+    const record = blank(url, 'not-https');
+    await save(tabId, record);
+    return record;
+  }
+  // never clobber a parsed cert with the reload placeholder (CDN hops + onUpdated race)
+  if (existing && existing.error === null) return existing;
   if (shouldKeepRecord(existing, url)) return existing;
-  const kind = classifyUrl(url);
-  const error =
-    kind === 'not-https' ? 'not-https' : attachedSpec ? 'reload' : 'no-security-info';
+  const error = attachedSpec ? 'reload' : 'no-security-info';
   const record = blank(url, error);
   await save(tabId, record);
   return record;
 }
 
+const OWN_LIST_PREFIX = 'https://raw.githubusercontent.com/cavanaug/zscaler-mitm/';
+
+async function tabUrlFromChrome(tabId) {
+  const hinted = tabHint.get(tabId);
+  if (hinted) return hinted;
+  try {
+    const t = await chrome.tabs.get(tabId);
+    return t.url || '';
+  } catch {
+    return '';
+  }
+}
+
+async function resolveActiveTab() {
+  const tryQuery = async (q) => {
+    try {
+      const [t] = await chrome.tabs.query(q);
+      if (t && t.id >= 0) return t;
+    } catch {
+      // query failed
+    }
+    return null;
+  };
+  const focused = await tryQuery({ active: true, lastFocusedWindow: true });
+  if (focused) return focused;
+  const anyActive = await tryQuery({ active: true });
+  if (anyActive) return anyActive;
+  try {
+    const win = await chrome.windows.getLastFocused({ populate: true });
+    const t = (win.tabs || []).find((x) => x.active);
+    if (t && t.id >= 0) return t;
+  } catch {
+    // no window
+  }
+  return null;
+}
+
 async function resolveTabId(details) {
   if (details.tabId >= 0) return details.tabId;
+  if (isOwnWebRequest(details, OWN_LIST_PREFIX)) return -1;
+  let tabs = [];
   try {
-    const matches = await chrome.tabs.query({ url: details.url });
-    if (matches.length === 1) return matches[0].id;
+    tabs = await chrome.tabs.query({});
   } catch {
-    // no matching tab
+    // no tabs
   }
-  return -1;
+  const active = await resolveActiveTab();
+  return pickTabId(details, tabs, active);
 }
 
 function leafRawDer(si) {
@@ -210,9 +275,10 @@ async function recordFromDetails(details) {
 
 async function reclassifyRecord(record) {
   if (!record || record.error !== null || !record.issuer) return record;
+  if (record.verdict === 'public') return record;
   const verdict = classify({
     issuer: record.issuer,
-    hostname: hostnameFromUrl(record.url),
+    hostname: hostnameFromUrl(record.pageUrl || record.url),
     publicCas: await currentPublicCas(),
     overlays: await loadOverlays(),
     chainSpkis: [],
@@ -223,6 +289,7 @@ async function reclassifyRecord(record) {
 
 function onHeadersReceived(details) {
   const run = async () => {
+    if (isOwnWebRequest(details, OWN_LIST_PREFIX)) return;
     let record;
     try {
       record = await recordFromDetails(details);
@@ -231,8 +298,15 @@ function onHeadersReceived(details) {
       record.detail = String(e && e.message ? e.message : e);
     }
     const tabId = await resolveTabId(details);
+    if (tabId >= 0 && details.type === 'main_frame' && details.url) tabHint.set(tabId, details.url);
+    const tabUrl = tabId >= 0 ? await tabUrlFromChrome(tabId) : '';
+    record = {
+      ...record,
+      pageUrl: documentUrl(details, tabUrl),
+    };
+    if (record.error === null) record = await reclassifyRecord(record);
     const leaf = details.securityInfo && (details.securityInfo.certificates || [])[0];
-    await writeMeta({
+    const extra = {
       lastTabId: details.tabId,
       resolvedTabId: tabId,
       lastUrl: details.url,
@@ -241,19 +315,22 @@ function onHeadersReceived(details) {
       hasSi: Boolean(details.securityInfo),
       derKind: leaf && leaf.rawDER != null ? typeof leaf.rawDER : 'missing',
       lastAt: Date.now(),
-    });
-    if (tabId < 0) return;
-    // ponytail: subresource cert if main_frame was missed; a CDN hop can differ
-    if (details.type !== 'main_frame') {
-      const existing = await load(tabId);
-      if (existing && existing.error === null) return;
+    };
+    if (record.error === null) {
+      extra.lastSuccess = record;
+      if (requestIsPageCert(details, tabUrl)) await persistSuccess(record);
     }
+    await writeMeta(extra);
+    if (tabId < 0) return;
     const existing = await load(tabId);
+    if (record.error === null && !requestIsPageCert(details, tabUrl)) return;
+    if (shouldSkipCapture(existing, details, tabUrl)) return;
+    if (record.error !== null && details.type !== 'main_frame') return;
     if (
       existing &&
       existing.error === null &&
       record.error !== null &&
-      shouldKeepRecord(existing, record.url)
+      shouldKeepRecord(existing, tabUrl || record.url)
     ) {
       return;
     }
@@ -302,13 +379,36 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   const run = async () => {
     try {
       if (msg && msg.type === 'overlays-changed') {
+        if (typeof msg.tabId === 'number' && msg.tabId >= 0 && msg.record) {
+          await save(msg.tabId, msg.record);
+          await applyIcon(msg.tabId);
+        }
         const tabs = await chrome.tabs.query({});
         for (const tab of tabs) {
           if (tab.id < 0) continue;
+          if (msg.tabId === tab.id && msg.record) continue;
           const rec = await load(tab.id);
           if (!rec) continue;
           await save(tab.id, await reclassifyRecord(rec));
           await applyIcon(tab.id);
+        }
+      } else if (msg && msg.type === 'apply-icon' && typeof msg.tabId === 'number') {
+        await applyIcon(msg.tabId);
+      } else if (msg && msg.type === 'probe' && typeof msg.url === 'string') {
+        let target = msg.url;
+        try {
+          target = new URL(msg.url).origin + '/';
+        } catch {
+          // use as-is
+        }
+        try {
+          await fetch(target, { method: 'HEAD', cache: 'no-store', redirect: 'follow' });
+        } catch {
+          try {
+            await fetch(target, { method: 'GET', cache: 'no-store', redirect: 'follow' });
+          } catch {
+            // page may require cookies; user can reload
+          }
         }
       }
     } finally {
@@ -322,10 +422,27 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
 chrome.tabs.onUpdated.addListener(async (tabId, info, tab) => {
   try {
     if (tabId < 0) return;
-    if (!info.url && info.status !== 'complete') return;
-    const url = tab.url || info.url;
+    if (info.url) tabHint.set(tabId, info.url);
+    if (info.url) {
+      const url = info.url;
+      if (classifyUrl(url) === 'not-https') {
+        await save(tabId, blank(url, 'not-https'));
+        await applyIcon(tabId);
+        return;
+      }
+      await ensureRecord(tabId, url);
+      await applyIcon(tabId);
+      return;
+    }
+    if (info.status !== 'complete') return;
+    const url = tab.url || tabHint.get(tabId);
     if (classifyUrl(url) === 'not-https') {
       await save(tabId, blank(url, 'not-https'));
+      await applyIcon(tabId);
+      return;
+    }
+    const existing = await load(tabId);
+    if (shouldKeepOnComplete(existing, url)) {
       await applyIcon(tabId);
       return;
     }
@@ -346,6 +463,11 @@ chrome.tabs.onActivated.addListener(async ({ tabId }) => {
     } catch {
       return;
     }
+    const existing = await load(tabId);
+    if (shouldKeepOnComplete(existing, url)) {
+      await applyIcon(tabId);
+      return;
+    }
     await ensureRecord(tabId, url);
     await applyIcon(tabId);
   } catch {
@@ -355,7 +477,8 @@ chrome.tabs.onActivated.addListener(async ({ tabId }) => {
 
 chrome.tabs.onRemoved.addListener(async (tabId) => {
   try {
-    await chrome.storage.session.remove(tabKey(tabId));
+    tabHint.delete(tabId);
+    await chrome.storage.session.remove([tabKey(tabId), 'ok:' + tabId]);
   } catch {
     // ponytail: swallow — never throw out of service worker
   }
