@@ -267,3 +267,89 @@ export function parseX509Names(der) {
   const subject = take(buf, i, 0x30);
   return { issuer: parseName(buf, issuer), subject: parseName(buf, subject) };
 }
+
+function skipTbsThroughSubject(buf, tbs) {
+  let i = tbs.start;
+  if (buf[i] === 0xa0) i = take(buf, i, 0xa0).i;
+  i = take(buf, i, 0x02).i;
+  i = take(buf, i, 0x30).i;
+  i = take(buf, i, 0x30).i;
+  i = take(buf, i, 0x30).i;
+  i = take(buf, i, 0x30).i;
+  return i;
+}
+
+function collectDnsNames(buf, subtreesWrapper, out) {
+  const seq = take(buf, subtreesWrapper.start, 0x30);
+  let i = seq.start;
+  while (i < seq.end) {
+    if (buf[i] === 0x82) {
+      const dns = take(buf, i, 0x82);
+      out.push(new TextDecoder('ascii').decode(buf.subarray(dns.start, dns.end)));
+      i = dns.i;
+    } else if (buf[i] === 0x30) {
+      const subtree = take(buf, i, 0x30);
+      i = subtree.i;
+      if (subtree.start < subtree.end && buf[subtree.start] === 0x82) {
+        const dns = take(buf, subtree.start, 0x82);
+        out.push(new TextDecoder('ascii').decode(buf.subarray(dns.start, dns.end)));
+      }
+    } else {
+      break;
+    }
+  }
+}
+
+function parseNameConstraintsValue(buf) {
+  const root = take(buf, 0, 0x30);
+  const permitted = [];
+  const excluded = [];
+  let i = root.start;
+  if (i < root.end && buf[i] === 0xa0) {
+    const subtrees = take(buf, i, 0xa0);
+    collectDnsNames(buf, subtrees, permitted);
+    i = subtrees.i;
+  }
+  if (i < root.end && buf[i] === 0xa1) {
+    const subtrees = take(buf, i, 0xa1);
+    collectDnsNames(buf, subtrees, excluded);
+  }
+  return { permitted, excluded };
+}
+
+function parseNameConstraintsFromExtensions(buf, extWrapper) {
+  const extensions = take(buf, extWrapper.start, 0x30);
+  let j = extensions.start;
+  while (j < extensions.end) {
+    const ext = take(buf, j, 0x30);
+    j = ext.i;
+    const oidEl = take(buf, ext.start, 0x06);
+    if (decodeOid(buf.subarray(oidEl.start, oidEl.end)) !== '2.5.29.30') continue;
+    let k = oidEl.i;
+    if (k < ext.end && buf[k] === 0x01) k = take(buf, k, 0x01).i;
+    const extValue = take(buf, k, 0x04);
+    return parseNameConstraintsValue(buf.subarray(extValue.start, extValue.end));
+  }
+  return null;
+}
+
+export function parseSpkiDer(der) {
+  const buf = derBytes(der);
+  const cert = take(buf, 0, 0x30);
+  const tbs = take(buf, cert.start, 0x30);
+  const i = skipTbsThroughSubject(buf, tbs);
+  const spki = take(buf, i, 0x30);
+  return buf.subarray(i, spki.i);
+}
+
+export function parseNameConstraints(der) {
+  const buf = derBytes(der);
+  const cert = take(buf, 0, 0x30);
+  const tbs = take(buf, cert.start, 0x30);
+  let i = skipTbsThroughSubject(buf, tbs);
+  i = take(buf, i, 0x30).i;
+  if (i < tbs.end && buf[i] === 0x81) i = take(buf, i, 0x81).i;
+  if (i < tbs.end && buf[i] === 0x82) i = take(buf, i, 0x82).i;
+  if (i >= tbs.end || buf[i] !== 0xa3) return null;
+  return parseNameConstraintsFromExtensions(buf, take(buf, i, 0xa3));
+}

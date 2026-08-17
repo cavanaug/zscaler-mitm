@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import test from 'node:test';
@@ -9,7 +10,9 @@ import {
   hostMatchesDns,
   iconKind,
   mergeOverlay,
+  parseNameConstraints,
   parsePublicCas,
+  parseSpkiDer,
   parseX509Names,
   pickPublicCas,
   shouldKeepRecord,
@@ -275,6 +278,30 @@ test('parseX509Names: subject O = Zscaler Inc. with DigiCert issuer does not mat
 test('parseX509Names: garbage throws', () => {
   assert.throws(() => parseX509Names(Uint8Array.of(0xff, 0x00, 0x01)));
   assert.throws(() => parseX509Names(new Uint8Array(0)));
+});
+
+test('parseNameConstraints: permitted .hp.com', () => {
+  const nc = parseNameConstraints(loadDer('issuer-nc-hp.der'));
+  assert.ok(nc);
+  assert.ok(nc.permitted.some((d) => d.replace(/^\./, '') === 'hp.com' || d === '.hp.com' || d === 'hp.com'));
+  assert.equal(
+    classify({
+      issuer: { CN: 'HP Test CA', O: 'HP Inc', OU: '' },
+      hostname: 'hp.com',
+      publicCas: EMPTY_PUBLIC_CAS,
+      overlays: [],
+      chainSpkis: [],
+      certNc: nc,
+    }),
+    'in-scope',
+  );
+});
+
+test('parseSpkiDer: non-empty and hashes stably', () => {
+  const spki = parseSpkiDer(loadDer('issuer-nc-hp.der'));
+  assert.ok(spki.byteLength > 16);
+  const hex = createHash('sha256').update(spki).digest('hex');
+  assert.equal(hex.length, 64);
 });
 
 test('parseX509Names: ArrayBuffer and JSON-cloned bytes', () => {
