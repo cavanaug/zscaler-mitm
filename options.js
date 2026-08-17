@@ -32,16 +32,16 @@ function overlayKey(o) {
   return o.O + '\0' + (o.CN ?? '');
 }
 
-function renderList(overlays) {
+function renderList(items) {
   const list = document.getElementById('list');
   const empty = document.getElementById('empty');
   list.replaceChildren();
-  if (!overlays.length) {
+  if (!items.length) {
     empty.hidden = false;
     return;
   }
   empty.hidden = true;
-  for (const o of overlays) {
+  for (const o of items) {
     const li = document.createElement('li');
     const meta = document.createElement('div');
     meta.className = 'meta';
@@ -54,13 +54,17 @@ function renderList(overlays) {
     del.textContent = 'Delete';
     del.addEventListener('click', async () => {
       const next = overlays.filter((x) => overlayKey(x) !== overlayKey(o));
-      await saveOverlays(next);
-      renderList(next);
-      overlays.splice(0, overlays.length, ...next);
+      await applyOverlays(next);
     });
     li.append(meta, dns, del);
     list.append(li);
   }
+}
+
+async function applyOverlays(next) {
+  overlays = next;
+  await saveOverlays(overlays);
+  renderList(overlays);
 }
 
 async function renderFooter() {
@@ -77,7 +81,7 @@ async function renderFooter() {
   }
 }
 
-const overlays = await loadOverlays();
+let overlays = await loadOverlays();
 renderList(overlays);
 await renderFooter();
 
@@ -96,8 +100,6 @@ document.getElementById('add').addEventListener('submit', async (e) => {
   } else {
     next.push(entry);
   }
-  await saveOverlays(next);
-  renderList(next);
-  overlays.splice(0, overlays.length, ...next);
+  await applyOverlays(next);
   e.target.reset();
 });
