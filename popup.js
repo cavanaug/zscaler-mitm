@@ -16,6 +16,9 @@ import {
 } from './cert.js';
 // ponytail: public-cas.json is ~145KB — load only for Allow, not on every popup open
 
+const FLAG_DISABLED =
+  'TLS cert API is disabled. Open chrome://flags, search WebRequestSecurityInfo, set Enabled, restart the browser. If that flag is missing, launch with --enable-features=WebRequestSecurityInfo';
+
 function nameBlock(title, name) {
   const wrap = document.createElement('div');
   const h = document.createElement('h2');
@@ -47,15 +50,66 @@ function ping(msg) {
   }
 }
 
-function paintDebug({ tab, record, meta, hasHttps, source, overlayCount }) {
-  document.getElementById('debug').textContent = formatCaptureDebug({
-    tab,
-    record,
-    meta,
-    hasHttps,
-    source,
-    overlayCount,
+/** First error-free record among the given session-storage keys. */
+function pickBestRecord(got, keys) {
+  for (const k of keys) {
+    const r = got[k];
+    if (r && r.error === null) return r;
+  }
+  return null;
+}
+
+/** Wait for the background capture to land in session storage (max ~1s). */
+function waitForCapture(keys, ms = 1000) {
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      chrome.storage.onChanged.removeListener(onChange);
+      resolve(value);
+    };
+    const timer = setTimeout(() => finish(null), ms);
+    const onChange = async (changes, area) => {
+      if (area !== 'session' || !keys.some((k) => k in changes)) return;
+      const hit = pickBestRecord(await chrome.storage.session.get(keys), keys);
+      if (hit) finish(hit);
+    };
+    chrome.storage.onChanged.addListener(onChange);
   });
+}
+
+/** Why is there no verdict for this tab? First matching diagnosis wins. */
+function reloadHint(hasHttps, meta) {
+  const rows = [
+    [
+      !hasHttps,
+      'Needs HTTPS site access to read certificates. Chrome → this extension → Site access → On all sites.',
+    ],
+    [!meta?.attachedSpec, 'webRequest did not attach. Open chrome://extensions → Zscaler MITM → service worker errors.'],
+    [!meta.lastAt && !meta.canaryAt, 'Reload this tab to capture the certificate.'],
+    [!meta.lastAt && meta.canaryAt, FLAG_DISABLED],
+    [
+      meta.lastTabId < 0 && meta.hasSi,
+      'A certificate was read but Chrome did not attach it to this tab. Reload this page, or click the toolbar icon again after the page finishes loading.',
+    ],
+    [meta.hasSi === false, FLAG_DISABLED],
+  ];
+  const hit = rows.find(([when]) => when);
+  if (hit) return hit[1];
+  return (
+    'Last capture tab=' +
+    meta.lastTabId +
+    ' si=' +
+    (meta.hasSi ? 'yes' : 'no') +
+    (meta.lastError ? ' err=' + meta.lastError : '') +
+    (meta.lastUrl ? ' url=' + meta.lastUrl : '')
+  );
+}
+
+function paintDebug(state) {
+  document.getElementById('debug').textContent = formatCaptureDebug(state);
 }
 
 function paintStatus(record) {
@@ -100,36 +154,122 @@ function paintFields({ record, meta, hasHttps, tab }) {
   if (!record || record.error === 'reload') {
     const hint = document.createElement('p');
     hint.id = 'hint';
-    if (!hasHttps) {
-      hint.textContent =
-        'Needs HTTPS site access to read certificates. Chrome → this extension → Site access → On all sites.';
-      grant.hidden = false;
-    } else if (!meta?.attachedSpec) {
-      hint.textContent =
-        'webRequest did not attach. Open chrome://extensions → Zscaler MITM → service worker errors.';
-    } else if (!meta.lastAt && !meta.canaryAt) {
-      hint.textContent = 'Reload this tab to capture the certificate.';
-    } else if (!meta.lastAt && meta.canaryAt) {
-      hint.textContent =
-        'TLS cert API is disabled. Open chrome://flags, search WebRequestSecurityInfo, set Enabled, restart the browser. If that flag is missing, launch with --enable-features=WebRequestSecurityInfo';
-    } else if (meta.lastTabId < 0 && meta.hasSi) {
-      hint.textContent =
-        'A certificate was read but Chrome did not attach it to this tab. Reload this page, or click the toolbar icon again after the page finishes loading.';
-    } else if (meta.hasSi === false) {
-      hint.textContent =
-        'TLS cert API is disabled. Open chrome://flags, search WebRequestSecurityInfo, set Enabled, restart the browser. If that flag is missing, launch with --enable-features=WebRequestSecurityInfo';
-    } else {
-      hint.textContent =
-        'Last capture tab=' +
-        meta.lastTabId +
-        ' si=' +
-        (meta.hasSi ? 'yes' : 'no') +
-        (meta.lastError ? ' err=' + meta.lastError : '') +
-        (meta.lastUrl ? ' url=' + meta.lastUrl : '');
-    }
+    hint.textContent = reloadHint(hasHttps, meta);
     fields.append(hint);
+    grant.hidden = !hasHttps;
     recapture.hidden = false;
   }
+}
+
+function paintAll(state) {
+  paintStatus(state.record);
+  paintFields(state);
+  paintDebug(state);
+}
+
+function lastSuccessFits(meta, tab) {
+  if (!meta?.lastSuccess || meta.lastSuccess.error !== null) return false;
+  if (Number(meta.lastTabId) === tab.id || Number(meta.resolvedTabId) === tab.id) return true;
+  return (
+    sameHttpsOrigin(meta.lastSuccess.pageUrl || meta.lastSuccess.url, tab.url) ||
+    certFitsTab(meta.lastSuccess.url, tab.url) ||
+    certFitsTab(meta.lastSuccess.pageUrl, tab.url)
+  );
+}
+
+async function readState(tab) {
+  const key = 'tab:' + tab.id;
+  const okKey = 'ok:' + tab.id;
+  const originKey = storageOriginKey(tab.url);
+  const got = await chrome.storage.session.get([key, okKey, originKey, 'meta:wr'].filter(Boolean));
+  const meta = got['meta:wr'] ?? null;
+  const hasHttps = await chrome.permissions.contains({ origins: ['https://*/*'] });
+
+  let record = got[key] ?? null;
+  let source = record && record.error === null ? 'tab' : 'none';
+  if (!record || record.error === 'reload') {
+    const best =
+      pickBestRecord(got, [okKey, originKey].filter(Boolean)) ??
+      (lastSuccessFits(meta, tab) ? meta.lastSuccess : null);
+    if (best) {
+      record = best;
+      source = best === got[okKey] ? 'ok' : originKey && best === got[originKey] ? 'origin' : 'lastSuccess';
+      await chrome.storage.session.set({ [key]: record });
+    }
+  }
+  return { tab, key, okKey, originKey, record, meta, hasHttps, source, overlayCount: 0 };
+}
+
+function wireGrantRecapture(tab) {
+  document.getElementById('grant').addEventListener('click', async () => {
+    const ok = await chrome.permissions.request({ origins: ['https://*/*'] });
+    const hint = document.getElementById('hint');
+    if (hint) {
+      hint.textContent = ok ? 'Access granted. Reload this tab.' : 'Permission denied.';
+    }
+    document.getElementById('grant').hidden = ok;
+  });
+  document.getElementById('recapture').addEventListener('click', () => chrome.tabs.reload(tab.id));
+}
+
+async function probeIfNeeded(state) {
+  const { tab, key, okKey, originKey, hasHttps } = state;
+  if (state.record && state.record.error !== 'reload') return;
+  if (!hasHttps || !tab.url || !tab.url.startsWith('https:')) return;
+  ping({ type: 'probe', url: tab.url, tabId: tab.id });
+  const hit = await waitForCapture([key, okKey, originKey].filter(Boolean));
+  if (hit) {
+    state.record = hit;
+    state.source = 'probe';
+    await chrome.storage.session.set({ [key]: hit });
+    ping({ type: 'apply-icon', tabId: tab.id });
+    paintStatus(hit);
+  }
+  const metaGot = await chrome.storage.session.get('meta:wr');
+  if (metaGot['meta:wr']) {
+    state.meta = metaGot['meta:wr'];
+    paintFields(state);
+    paintDebug(state);
+  }
+}
+
+async function wireAllow(state) {
+  const { tab, key, okKey, record } = state;
+  if (!record || record.error !== null || record.verdict === 'public' || !record.issuer) return;
+  const allow = document.getElementById('allow');
+  const host = hostnameFromUrl(tab.url) || hostnameFromUrl(record.pageUrl || record.url);
+  const overlays = await loadOverlays();
+  const allowed = overlayDnsHasHost(overlayForIssuer(record.issuer, overlays), host);
+  allow.hidden = false;
+  allow.textContent = (allowed ? 'Disallow' : 'Allow') + ' this issuer for ' + host;
+  allow.addEventListener('click', async () => {
+    const next = allowed
+      ? removeOverlayHost(overlays, record.issuer, host)
+      : mergeOverlay(overlays, record.issuer, host);
+    await saveOverlays(next);
+    const { default: publicCasPacked } = await import('./public-cas.json', {
+      with: { type: 'json' },
+    });
+    const updated = {
+      ...record,
+      pageUrl: record.pageUrl || tab.url,
+      verdict: classify({
+        issuer: record.issuer,
+        hostname: host,
+        publicCas: pickPublicCas(null, null, publicCasPacked),
+        overlays: next,
+        chainSpkis: [],
+        certNc: record.certNc,
+      }),
+    };
+    await chrome.storage.session.set({ [key]: updated, [okKey]: updated });
+    ping({
+      type: 'overlays-changed',
+      tabId: tab.id,
+      record: updated,
+    });
+    location.reload();
+  });
 }
 
 async function main() {
@@ -142,134 +282,23 @@ async function main() {
     return;
   }
 
-  const key = 'tab:' + tab.id;
-  const okKey = 'ok:' + tab.id;
-  const originKey = storageOriginKey(tab.url);
-  const got = await chrome.storage.session.get([key, okKey, originKey, 'meta:wr'].filter(Boolean));
-  let record = got[key] ?? null;
-  let meta = got['meta:wr'] ?? null;
-  const hasHttps = await chrome.permissions.contains({ origins: ['https://*/*'] });
-
-  const lastOk = meta?.lastSuccess && meta.lastSuccess.error === null;
-  const tabMatch = meta && (Number(meta.lastTabId) === tab.id || Number(meta.resolvedTabId) === tab.id);
-  const lastFits =
-    lastOk &&
-    (sameHttpsOrigin(meta.lastSuccess.pageUrl || meta.lastSuccess.url, tab.url) ||
-      certFitsTab(meta.lastSuccess.url, tab.url) ||
-      certFitsTab(meta.lastSuccess.pageUrl, tab.url) ||
-      tabMatch);
-  const originHit = originKey && got[originKey] && got[originKey].error === null ? got[originKey] : null;
-  let source = record && record.error === null ? 'tab' : 'none';
-  if ((!record || record.error === 'reload') && got[okKey] && got[okKey].error === null) {
-    record = got[okKey];
-    source = 'ok';
-    await chrome.storage.session.set({ [key]: record });
-  } else if ((!record || record.error === 'reload') && originHit) {
-    record = originHit;
-    source = 'origin';
-    await chrome.storage.session.set({ [key]: record });
-  } else if ((!record || record.error === 'reload') && lastFits) {
-    record = meta.lastSuccess;
-    source = 'lastSuccess';
-    await chrome.storage.session.set({ [key]: record });
-  }
-
-  // paint before probe / icon — hung messaging used to leave a blank popup
-  paintStatus(record);
-  paintFields({ record, meta, hasHttps, tab });
-  let overlayCount = 0;
+  const state = await readState(tab);
   try {
-    overlayCount = (await loadOverlays()).reduce((n, o) => n + ((o && o.dns && o.dns.length) || 0), 0);
+    state.overlayCount = (await loadOverlays()).reduce((n, o) => n + ((o && o.dns && o.dns.length) || 0), 0);
   } catch {
     // ignore
   }
-  paintDebug({ tab, record, meta, hasHttps, source, overlayCount });
 
-  document.getElementById('grant').addEventListener('click', async () => {
-    const ok = await chrome.permissions.request({ origins: ['https://*/*'] });
-    const hint = document.getElementById('hint');
-    if (hint) {
-      hint.textContent = ok ? 'Access granted. Reload this tab.' : 'Permission denied.';
-    }
-    document.getElementById('grant').hidden = ok;
-  });
-  document.getElementById('recapture').addEventListener('click', () => chrome.tabs.reload(tab.id));
+  // paint before probe / icon — hung messaging used to leave a blank popup
+  paintAll(state);
+  wireGrantRecapture(tab);
 
-  if (record && record.error === null) {
+  if (state.record && state.record.error === null) {
     ping({ type: 'apply-icon', tabId: tab.id });
   }
 
-  if (
-    (!record || record.error === 'reload') &&
-    hasHttps &&
-    tab.url &&
-    tab.url.startsWith('https:')
-  ) {
-    ping({ type: 'probe', url: tab.url, tabId: tab.id });
-    for (let i = 0; i < 20; i++) {
-      await new Promise((r) => setTimeout(r, 50));
-      const again = await chrome.storage.session.get([key, okKey, originKey].filter(Boolean));
-      const hit =
-        (again[key] && again[key].error === null && again[key]) ||
-        (again[okKey] && again[okKey].error === null && again[okKey]) ||
-        (originKey && again[originKey] && again[originKey].error === null && again[originKey]);
-      if (hit) {
-        record = hit;
-        source = 'probe';
-        await chrome.storage.session.set({ [key]: record });
-        ping({ type: 'apply-icon', tabId: tab.id });
-        const metaGot = await chrome.storage.session.get('meta:wr');
-        if (metaGot['meta:wr']) meta = metaGot['meta:wr'];
-        paintStatus(record);
-        paintFields({ record, meta, hasHttps, tab });
-        paintDebug({ tab, record, meta, hasHttps, source, overlayCount });
-        break;
-      }
-    }
-    const metaGot = await chrome.storage.session.get('meta:wr');
-    if (metaGot['meta:wr']) {
-      meta = metaGot['meta:wr'];
-      paintFields({ record, meta, hasHttps, tab });
-      paintDebug({ tab, record, meta, hasHttps, source, overlayCount });
-    }
-  }
-
-  if (record && record.error === null && record.verdict !== 'public' && record.issuer) {
-    const allow = document.getElementById('allow');
-    const host = hostnameFromUrl(tab.url) || hostnameFromUrl(record.pageUrl || record.url);
-    const overlays = await loadOverlays();
-    const allowed = overlayDnsHasHost(overlayForIssuer(record.issuer, overlays), host);
-    allow.hidden = false;
-    allow.textContent = (allowed ? 'Disallow' : 'Allow') + ' this issuer for ' + host;
-    allow.addEventListener('click', async () => {
-      const next = allowed
-        ? removeOverlayHost(overlays, record.issuer, host)
-        : mergeOverlay(overlays, record.issuer, host);
-      await saveOverlays(next);
-      const { default: publicCasPacked } = await import('./public-cas.json', {
-        with: { type: 'json' },
-      });
-      const updated = {
-        ...record,
-        pageUrl: record.pageUrl || tab.url,
-        verdict: classify({
-          issuer: record.issuer,
-          hostname: host,
-          publicCas: pickPublicCas(null, null, publicCasPacked),
-          overlays: next,
-          chainSpkis: [],
-          certNc: record.certNc,
-        }),
-      };
-      await chrome.storage.session.set({ [key]: updated, [okKey]: updated });
-      ping({
-        type: 'overlays-changed',
-        tabId: tab.id,
-        record: updated,
-      });
-      location.reload();
-    });
-  }
+  await probeIfNeeded(state);
+  await wireAllow(state);
 }
 
 main().catch((e) => {

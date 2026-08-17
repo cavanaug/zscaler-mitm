@@ -1,73 +1,74 @@
+import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { writeFileSync } from 'node:fs';
-import { parseSpkiDer } from '../cert.js';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { parseSpkiDer } from '../asn1.js';
 
 const MOZILLA_PEM_URL =
   'https://ccadb.my.salesforce-sites.com/mozilla/IncludedCACertificateReportPEMCSV';
 const V4A_URL =
   'https://ccadb.my.salesforce-sites.com/ccadb/AllCertificateRecordsCSVFormatV4a';
 
-function parseCsv(text) {
-  const rows = [];
-  let row = [];
-  let field = '';
-  let i = 0;
-  let inQuotes = false;
-
-  while (i < text.length) {
-    const c = text[i];
-    if (inQuotes) {
-      if (c === '"') {
-        if (text[i + 1] === '"') {
-          field += '"';
-          i += 2;
-        } else {
-          inQuotes = false;
-          i++;
-        }
-      } else {
-        field += c;
-        i++;
-      }
-    } else if (c === '"') {
-      inQuotes = true;
-      i++;
-    } else if (c === ',') {
-      row.push(field);
-      field = '';
-      i++;
-    } else if (c === '\r') {
-      i++;
-      if (text[i] === '\n') i++;
-      row.push(field);
-      field = '';
-      if (row.some((x) => x !== '')) rows.push(row);
-      row = [];
-    } else if (c === '\n') {
-      i++;
-      row.push(field);
-      field = '';
-      if (row.some((x) => x !== '')) rows.push(row);
-      row = [];
-    } else {
-      field += c;
-      i++;
-    }
+/** Run xsv over `text`, return row objects for the selected columns.
+ *  Only works for columns without embedded newlines (PEM is handled separately). */
+function xsvRows(text, columns) {
+  const dir = mkdtempSync(join(tmpdir(), 'ccadb-'));
+  try {
+    const csvPath = join(dir, 'in.csv');
+    const selPath = join(dir, 'sel.csv');
+    writeFileSync(csvPath, text);
+    writeFileSync(
+      selPath,
+      execFileSync('xsv', ['select', columns.map((c) => `"${c}"`).join(','), csvPath], {
+        maxBuffer: 1 << 26,
+      }),
+    );
+    const tsv = execFileSync('xsv', ['fmt', '-t', '\t', selPath], { maxBuffer: 1 << 26, encoding: 'utf8' });
+    const [header, ...lines] = tsv.trimEnd().split('\n');
+    const keys = header.split('\t');
+    return lines.map((line) => {
+      const cells = line.split('\t');
+      return Object.fromEntries(keys.map((k, i) => [k, cells[i] ?? '']));
+    });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
   }
-  if (field !== '' || row.length > 0) {
-    row.push(field);
-    if (row.some((x) => x !== '')) rows.push(row);
-  }
-  return rows;
 }
 
-function rowsToObjects(rows) {
-  const [header, ...data] = rows;
-  return data.map((cells) => {
-    const obj = {};
-    for (let i = 0; i < header.length; i++) obj[header[i]] = cells[i] ?? '';
-    return obj;
-  });
+/** Extract one CSV column as raw per-record values, keeping multi-line quoted fields intact. */
+function xsvSingleColumn(text, column) {
+  const dir = mkdtempSync(join(tmpdir(), 'ccadb-'));
+  try {
+    const csvPath = join(dir, 'in.csv');
+    writeFileSync(csvPath, text);
+    const csv = execFileSync('xsv', ['select', `"${column}"`, csvPath], {
+      maxBuffer: 1 << 26,
+      encoding: 'utf8',
+    });
+    const out = [];
+    let span = null; // open "..." record with embedded newlines
+    for (const line of csv.trimEnd().split('\n')) {
+      if (span !== null) {
+        span.push(line);
+        if (line.endsWith('"')) {
+          out.push(span.join('\n'));
+          span = null;
+        }
+      } else if (line.startsWith('"') && !line.endsWith('"')) {
+        span = [line];
+      } else {
+        out.push(line);
+      }
+    }
+    return out.slice(1); // drop header
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+function csvUnquote(v) {
+  return v.startsWith('"') && v.endsWith('"') ? v.slice(1, -1).replace(/""/g, '"') : v;
 }
 
 function add(set, value) {
@@ -97,13 +98,17 @@ function spkiHash(pem) {
   }
 }
 
-function processMozillaPem(rows, organizations, issuerCNs, rootSpkis) {
-  for (const row of rows) {
+function processMozillaPem(rows, pems, organizations, issuerCNs, rootSpkis) {
+  if (rows.length !== pems.length) {
+    throw new Error(`mozilla row mismatch: ${rows.length} rows vs ${pems.length} pems`);
+  }
+  for (let i = 0; i < rows.length; i++) {
+    const row = rows[i];
     if (!row['Trust Bits']?.includes('Websites')) continue;
     add(organizations, row.Owner);
     add(organizations, row['Certificate Issuer Organization']);
     addIssuerCn(issuerCNs, row['Common Name or Certificate Name']);
-    const hash = spkiHash(row['PEM Info']);
+    const hash = spkiHash(csvUnquote(pems[i]));
     if (hash) rootSpkis.add(hash);
   }
 }
@@ -137,8 +142,30 @@ async function main() {
   const issuerCNs = new Set();
   const rootSpkis = new Set();
 
-  processMozillaPem(rowsToObjects(parseCsv(mozillaText)), organizations, issuerCNs, rootSpkis);
-  processV4a(rowsToObjects(parseCsv(v4aText)), organizations, issuerCNs);
+  processMozillaPem(
+    xsvRows(mozillaText, [
+      'Trust Bits',
+      'Owner',
+      'Certificate Issuer Organization',
+      'Common Name or Certificate Name',
+    ]),
+    xsvSingleColumn(mozillaText, 'PEM Info'),
+    organizations,
+    issuerCNs,
+    rootSpkis,
+  );
+  processV4a(
+    xsvRows(v4aText, [
+      'Revocation Status',
+      'Chrome Status',
+      'Mozilla Status',
+      'Status of Root Cert',
+      'CA Owner',
+      'Certificate Name',
+    ]),
+    organizations,
+    issuerCNs,
+  );
   addKnownOrgAliases(organizations);
 
   const orgList = [...organizations].sort();

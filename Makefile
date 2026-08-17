@@ -2,6 +2,8 @@ NAME := zscaler-mitm
 DIST := dist
 STAGE := $(DIST)/$(NAME)
 ZIP := $(DIST)/$(NAME).zip
+FILES := manifest.json background.js cert.js asn1.js tab-match.js debug.js overlay-store.js \
+	popup.html popup.js options.html options.js public-cas.json
 
 .PHONY: package test clean icons
 
@@ -20,10 +22,10 @@ icons:
 
 package: $(ZIP)
 
-$(ZIP): manifest.json background.js cert.js tab-match.js debug.js overlay-store.js popup.html popup.js options.html options.js public-cas.json $(wildcard icons/*.png)
+$(ZIP): $(FILES) $(wildcard icons/*.png)
 	rm -rf $(STAGE) $(ZIP)
 	mkdir -p $(STAGE)
-	cp manifest.json background.js cert.js tab-match.js debug.js overlay-store.js popup.html popup.js options.html options.js public-cas.json $(STAGE)/
+	cp $(FILES) $(STAGE)/
 	cp -r icons $(STAGE)/icons
 	cd $(DIST) && zip -r $(NAME).zip $(NAME)
 	@echo Wrote $(ZIP)

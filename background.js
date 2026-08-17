@@ -3,14 +3,12 @@ import {
   classify,
   hostnameFromUrl,
   iconKind,
-  parseNameConstraints,
-  parseSpkiDer,
   parsePublicCas,
   pickPublicCas,
-  parseX509Names,
   shouldKeepOnComplete,
   shouldKeepRecord,
 } from './cert.js';
+import { parseNameConstraints, parseSpkiDer, parseX509Names } from './asn1.js';
 import { documentUrl, isOwnWebRequest, pickTabId, requestIsPageCert, shouldSkipCapture, storageOriginKey, storageOriginKeys } from './tab-match.js';
 import { loadOverlays } from './overlay-store.js';
 import { probeFetch } from './probe.js';
@@ -36,9 +34,14 @@ async function sha256Hex(bytes) {
   return [...new Uint8Array(hash)].map((b) => b.toString(16).padStart(2, '0')).join('');
 }
 
+let publicCasCache = null;
+
 async function currentPublicCas() {
-  const got = await chrome.storage.local.get(['publicCas', 'publicCasFetchedAt']);
-  return pickPublicCas(got.publicCas, null, publicCasPacked);
+  if (!publicCasCache) {
+    const got = await chrome.storage.local.get(['publicCas', 'publicCasFetchedAt']);
+    publicCasCache = pickPublicCas(got.publicCas, null, publicCasPacked);
+  }
+  return publicCasCache;
 }
 
 async function refreshPublicCas(force) {
@@ -53,6 +56,7 @@ async function refreshPublicCas(force) {
     const parsed = parsePublicCas(text);
     if (!parsed) return;
     await chrome.storage.local.set({ publicCas: parsed, publicCasFetchedAt: Date.now() });
+    publicCasCache = parsed;
   } catch {
     // keep last good / packed
   }
@@ -254,38 +258,34 @@ async function recordFromDetails(details) {
       certNc = null;
     }
   }
-  const publicCas = await currentPublicCas();
-  const overlays = await loadOverlays();
-  const verdict = classify({
-    issuer: names.issuer,
-    hostname: hostnameFromUrl(details.url),
-    publicCas,
-    overlays,
-    chainSpkis,
-    certNc,
-  });
+  // verdict is computed once, in onHeadersReceived, after pageUrl is known
   return {
     url: details.url,
     subject: names.subject,
     issuer: names.issuer,
-    verdict,
     certNc,
+    chainSpkis,
     error: null,
   };
 }
 
-async function reclassifyRecord(record) {
-  if (!record || record.error !== null || !record.issuer) return record;
-  if (record.verdict === 'public') return record;
-  const verdict = classify({
+async function classifyRecord(record, chainSpkis) {
+  const verdict = await classify({
     issuer: record.issuer,
     hostname: hostnameFromUrl(record.pageUrl || record.url),
     publicCas: await currentPublicCas(),
     overlays: await loadOverlays(),
-    chainSpkis: [],
+    chainSpkis,
     certNc: record.certNc,
   });
   return { ...record, verdict };
+}
+
+async function reclassifyRecord(record) {
+  if (!record || record.error !== null || !record.issuer) return record;
+  // stored records have no chainSpkis; a public verdict may rest on SPKI match
+  if (record.verdict === 'public') return record;
+  return classifyRecord(record, []);
 }
 
 function onHeadersReceived(details) {
@@ -305,7 +305,10 @@ function onHeadersReceived(details) {
       ...record,
       pageUrl: documentUrl(details, tabUrl),
     };
-    if (record.error === null) record = await reclassifyRecord(record);
+    if (record.error === null) {
+      const { chainSpkis, ...rest } = record;
+      record = await classifyRecord(rest, chainSpkis);
+    }
     const leaf = details.securityInfo && (details.securityInfo.certificates || [])[0];
     const extra = {
       lastTabId: details.tabId,
