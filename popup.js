@@ -82,29 +82,30 @@ function waitForCapture(keys, ms = 1000) {
 
 /** Why is there no verdict for this tab? First matching diagnosis wins. */
 function reloadHint(hasHttps, meta) {
+  const m = meta ?? {};
   const rows = [
     [
       !hasHttps,
       'Needs HTTPS site access to read certificates. Chrome → this extension → Site access → On all sites.',
     ],
-    [!meta?.attachedSpec, 'webRequest did not attach. Open chrome://extensions → Zscaler MITM → service worker errors.'],
-    [!meta.lastAt && !meta.canaryAt, 'Reload this tab to capture the certificate.'],
-    [!meta.lastAt && meta.canaryAt, FLAG_DISABLED],
+    [!m.attachedSpec, 'webRequest did not attach. Open chrome://extensions → Zscaler MITM → service worker errors.'],
+    [!m.lastAt && !m.canaryAt, 'Reload this tab to capture the certificate.'],
+    [!m.lastAt && m.canaryAt, FLAG_DISABLED],
     [
-      meta.lastTabId < 0 && meta.hasSi,
+      (m.lastTabId ?? -1) < 0 && m.hasSi,
       'A certificate was read but Chrome did not attach it to this tab. Reload this page, or click the toolbar icon again after the page finishes loading.',
     ],
-    [meta.hasSi === false, FLAG_DISABLED],
+    [m.hasSi === false, FLAG_DISABLED],
   ];
   const hit = rows.find(([when]) => when);
   if (hit) return hit[1];
   return (
     'Last capture tab=' +
-    meta.lastTabId +
+    m.lastTabId +
     ' si=' +
-    (meta.hasSi ? 'yes' : 'no') +
-    (meta.lastError ? ' err=' + meta.lastError : '') +
-    (meta.lastUrl ? ' url=' + meta.lastUrl : '')
+    (m.hasSi ? 'yes' : 'no') +
+    (m.lastError ? ' err=' + m.lastError : '') +
+    (m.lastUrl ? ' url=' + m.lastUrl : '')
   );
 }
 
@@ -212,7 +213,8 @@ function wireGrantRecapture(tab) {
   document.getElementById('recapture').addEventListener('click', () => chrome.tabs.reload(tab.id));
 }
 
-async function probeIfNeeded(state) {  const { tab, key, okKey, originKey, hasHttps } = state;
+async function probeIfNeeded(state) {
+  const { tab, key, okKey, originKey, hasHttps } = state;
   if (state.record && state.record.error !== 'reload') return;
   if (!hasHttps || !tab.url || !tab.url.startsWith('https:')) return;
   ping({ type: 'probe', url: tab.url, tabId: tab.id });
