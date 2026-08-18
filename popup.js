@@ -212,8 +212,7 @@ function wireGrantRecapture(tab) {
   document.getElementById('recapture').addEventListener('click', () => chrome.tabs.reload(tab.id));
 }
 
-async function probeIfNeeded(state) {
-  const { tab, key, okKey, originKey, hasHttps } = state;
+async function probeIfNeeded(state) {  const { tab, key, okKey, originKey, hasHttps } = state;
   if (state.record && state.record.error !== 'reload') return;
   if (!hasHttps || !tab.url || !tab.url.startsWith('https:')) return;
   ping({ type: 'probe', url: tab.url, tabId: tab.id });
@@ -233,12 +232,11 @@ async function probeIfNeeded(state) {
   }
 }
 
-async function wireAllow(state) {
+async function wireAllow(state, overlays) {
   const { tab, key, okKey, record } = state;
   if (!record || record.error !== null || record.verdict === 'public' || !record.issuer) return;
   const allow = document.getElementById('allow');
   const host = hostnameFromUrl(tab.url) || hostnameFromUrl(record.pageUrl || record.url);
-  const overlays = await loadOverlays();
   const allowed = overlayDnsHasHost(overlayForIssuer(record.issuer, overlays), host);
   allow.hidden = false;
   allow.textContent = (allowed ? 'Disallow' : 'Allow') + ' this issuer for ' + host;
@@ -283,11 +281,13 @@ async function main() {
   }
 
   const state = await readState(tab);
+  let overlays = [];
   try {
-    state.overlayCount = (await loadOverlays()).reduce((n, o) => n + ((o && o.dns && o.dns.length) || 0), 0);
+    overlays = await loadOverlays();
   } catch {
     // ignore
   }
+  state.overlayCount = overlays.reduce((n, o) => n + ((o && o.dns && o.dns.length) || 0), 0);
 
   // paint before probe / icon — hung messaging used to leave a blank popup
   paintAll(state);
@@ -298,7 +298,7 @@ async function main() {
   }
 
   await probeIfNeeded(state);
-  await wireAllow(state);
+  await wireAllow(state, overlays);
 }
 
 main().catch((e) => {

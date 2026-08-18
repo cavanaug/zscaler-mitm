@@ -3,6 +3,7 @@ import {
   classify,
   hostnameFromUrl,
   iconKind,
+  isPublicIssuer,
   parsePublicCas,
   pickPublicCas,
   shouldKeepOnComplete,
@@ -26,8 +27,14 @@ const ICONS = {
 
 const META = 'meta:wr';
 const tabHint = new Map();
+// tabId → origins with a known-good record (over-approximation; lets
+// subresource captures skip a storage read once the tab has its cert)
+const goodOrigins = new Map();
 let attachedSpec = null;
 let attachError = '';
+let activeTabId = null;
+let overlaysCache = null;
+let metaState; // mirror of META in session storage; undefined until first read
 
 async function sha256Hex(bytes) {
   const hash = await crypto.subtle.digest('SHA-256', bytes);
@@ -42,6 +49,11 @@ async function currentPublicCas() {
     publicCasCache = pickPublicCas(got.publicCas, null, publicCasPacked);
   }
   return publicCasCache;
+}
+
+async function currentOverlays() {
+  if (!overlaysCache) overlaysCache = await loadOverlays();
+  return overlaysCache;
 }
 
 async function refreshPublicCas(force) {
@@ -68,12 +80,27 @@ function tabKey(tabId) {
   return 'tab:' + tabId;
 }
 
+function originOf(url) {
+  try {
+    const u = new URL(url);
+    return u.protocol === 'https:' ? u.origin : null;
+  } catch {
+    return null;
+  }
+}
+
 async function save(tabId, record) {
   const payload = {};
   if (tabId >= 0) payload[tabKey(tabId)] = record;
   if (record && record.error === null) {
     if (tabId >= 0) payload['ok:' + tabId] = record;
     for (const k of storageOriginKeys(record.pageUrl, record.url)) payload[k] = record;
+    const o = originOf(record.pageUrl || record.url);
+    if (tabId >= 0 && o) {
+      let set = goodOrigins.get(tabId);
+      if (!set) goodOrigins.set(tabId, (set = new Set()));
+      set.add(o);
+    }
   }
   if (Object.keys(payload).length) await chrome.storage.session.set(payload);
 }
@@ -107,19 +134,27 @@ async function load(tabId) {
   return rec ?? null;
 }
 
-async function applyIcon(tabId) {
-  const record = await load(tabId);
+async function applyIcon(tabId, record) {
+  if (record === undefined) record = await load(tabId);
   const path = ICONS[iconKind(record)];
   try {
     await chrome.action.setIcon({ tabId, path });
   } catch {
     // tab closed
   }
-  try {
-    const active = await resolveActiveTab();
-    if (active && active.id === tabId) await chrome.action.setIcon({ path });
-  } catch {
-    // no focused window
+  if (activeTabId === null) {
+    try {
+      activeTabId = (await resolveActiveTab())?.id ?? -1;
+    } catch {
+      activeTabId = -1;
+    }
+  }
+  if (activeTabId === tabId) {
+    try {
+      await chrome.action.setIcon({ path });
+    } catch {
+      // no focused window
+    }
   }
 }
 
@@ -139,15 +174,21 @@ function blank(url, error) {
 }
 
 async function writeMeta(extra) {
-  const prev = (await chrome.storage.session.get(META))[META] || {};
-  await chrome.storage.session.set({
-    [META]: {
-      ...prev,
-      attachedSpec,
-      attachError,
-      ...extra,
-    },
-  });
+  if (metaState === undefined) {
+    metaState = (await chrome.storage.session.get(META))[META] || {};
+  }
+  const next = {
+    ...metaState,
+    attachedSpec,
+    attachError,
+    ...extra,
+  };
+  // only lastAt ticked → nothing observable changed, skip the write
+  const unchanged =
+    JSON.stringify({ ...metaState, lastAt: 0 }) === JSON.stringify({ ...next, lastAt: 0 });
+  metaState = next;
+  if (unchanged) return;
+  await chrome.storage.session.set({ [META]: next });
 }
 
 async function ensureRecord(tabId, url) {
@@ -238,16 +279,6 @@ async function recordFromDetails(details) {
   }
   const names = parseX509Names(der);
   const certs = Array.isArray(si.certificates) ? si.certificates : [];
-  const chainSpkis = [];
-  for (const c of certs) {
-    const raw = c && (c.rawDER ?? c.rawDer ?? c.raw_der);
-    if (raw == null) continue;
-    try {
-      chainSpkis.push(await sha256Hex(parseSpkiDer(raw)));
-    } catch {
-      // skip
-    }
-  }
   let certNc = null;
   const issuerCert = certs[1];
   const issuerDer = issuerCert && (issuerCert.rawDER ?? issuerCert.rawDer ?? issuerCert.raw_der);
@@ -258,23 +289,46 @@ async function recordFromDetails(details) {
       certNc = null;
     }
   }
-  // verdict is computed once, in onHeadersReceived, after pageUrl is known
+  const chainDers = [];
+  for (const c of certs) {
+    const raw = c && (c.rawDER ?? c.rawDer ?? c.raw_der);
+    if (raw != null) chainDers.push(raw);
+  }
+  // verdict is computed once in onHeadersReceived, after pageUrl is known;
+  // chain SPKIs stay raw — hashing is deferred until O/CN miss the public list
   return {
     url: details.url,
     subject: names.subject,
     issuer: names.issuer,
     certNc,
-    chainSpkis,
+    chainDers,
     error: null,
   };
 }
 
-async function classifyRecord(record, chainSpkis) {
-  const verdict = await classify({
+async function hashChainSpkis(ders) {
+  const out = [];
+  for (const raw of ders) {
+    try {
+      out.push(await sha256Hex(parseSpkiDer(raw)));
+    } catch {
+      // skip
+    }
+  }
+  return out;
+}
+
+async function classifyRecord(record) {
+  const publicCas = await currentPublicCas();
+  // ~46µs per cert — only worth hashing when issuer O and CN both miss
+  const chainSpkis = isPublicIssuer(record.issuer, publicCas, [])
+    ? []
+    : await hashChainSpkis(record.chainDers || []);
+  const verdict = classify({
     issuer: record.issuer,
     hostname: hostnameFromUrl(record.pageUrl || record.url),
-    publicCas: await currentPublicCas(),
-    overlays: await loadOverlays(),
+    publicCas,
+    overlays: await currentOverlays(),
     chainSpkis,
     certNc: record.certNc,
   });
@@ -283,14 +337,32 @@ async function classifyRecord(record, chainSpkis) {
 
 async function reclassifyRecord(record) {
   if (!record || record.error !== null || !record.issuer) return record;
-  // stored records have no chainSpkis; a public verdict may rest on SPKI match
+  // stored records have no chainDers; a public verdict may rest on SPKI match
   if (record.verdict === 'public') return record;
-  return classifyRecord(record, []);
+  return classifyRecord(record);
 }
 
 function onHeadersReceived(details) {
   const run = async () => {
     if (isOwnWebRequest(details, OWN_LIST_PREFIX)) return;
+    const isMainFrame = details.type === 'main_frame';
+    const tabId = await resolveTabId(details);
+    if (tabId >= 0 && isMainFrame && details.url) tabHint.set(tabId, details.url);
+    const tabUrl = tabId >= 0 ? await tabUrlFromChrome(tabId) : '';
+    const pageCert = requestIsPageCert(details, tabUrl);
+
+    // filter before parsing — a subresource cert that would never be saved
+    // still costs a full parse + classify otherwise
+    let existing;
+    if (!isMainFrame) {
+      if (tabId < 0 || !pageCert) return;
+      const origins = goodOrigins.get(tabId);
+      const tabOrigin = originOf(tabUrl);
+      if (origins && tabOrigin && origins.has(tabOrigin)) return;
+      existing = await load(tabId);
+      if (shouldSkipCapture(existing, details, tabUrl)) return;
+    }
+
     let record;
     try {
       record = await recordFromDetails(details);
@@ -298,16 +370,14 @@ function onHeadersReceived(details) {
       record = blank(details.url, 'parse');
       record.detail = String(e && e.message ? e.message : e);
     }
-    const tabId = await resolveTabId(details);
-    if (tabId >= 0 && details.type === 'main_frame' && details.url) tabHint.set(tabId, details.url);
-    const tabUrl = tabId >= 0 ? await tabUrlFromChrome(tabId) : '';
     record = {
       ...record,
       pageUrl: documentUrl(details, tabUrl),
     };
     if (record.error === null) {
-      const { chainSpkis, ...rest } = record;
-      record = await classifyRecord(rest, chainSpkis);
+      record = await classifyRecord(record);
+      const { chainDers, ...rest } = record;
+      record = rest;
     }
     const leaf = details.securityInfo && (details.securityInfo.certificates || [])[0];
     const extra = {
@@ -322,14 +392,13 @@ function onHeadersReceived(details) {
     };
     if (record.error === null) {
       extra.lastSuccess = record;
-      if (requestIsPageCert(details, tabUrl)) await persistSuccess(record);
+      if (pageCert) await persistSuccess(record);
     }
     await writeMeta(extra);
     if (tabId < 0) return;
-    const existing = await load(tabId);
-    if (record.error === null && !requestIsPageCert(details, tabUrl)) return;
+    if (existing === undefined) existing = await load(tabId);
     if (shouldSkipCapture(existing, details, tabUrl)) return;
-    if (record.error !== null && details.type !== 'main_frame') return;
+    if (record.error !== null && !isMainFrame) return;
     if (
       existing &&
       existing.error === null &&
@@ -339,7 +408,7 @@ function onHeadersReceived(details) {
       return;
     }
     await save(tabId, record);
-    await applyIcon(tabId);
+    await applyIcon(tabId, record);
   };
   void run().catch(() => {});
 }
@@ -359,15 +428,18 @@ for (const spec of extraSpecs) {
     attachError = String(e && e.message ? e.message : e);
   }
 }
+// one-shot: proves webRequest events flow, then stops costing IPCs per request
+function canary(details) {
+  chrome.webRequest.onBeforeRequest.removeListener(canary);
+  void writeMeta({
+    canaryAt: Date.now(),
+    canaryType: details.type,
+    canaryTabId: details.tabId,
+    canaryUrl: details.url,
+  }).catch(() => {});
+}
 try {
-  chrome.webRequest.onBeforeRequest.addListener((details) => {
-    void writeMeta({
-      canaryAt: Date.now(),
-      canaryType: details.type,
-      canaryTabId: details.tabId,
-      canaryUrl: details.url,
-    }).catch(() => {});
-  }, filter);
+  chrome.webRequest.onBeforeRequest.addListener(canary, filter);
 } catch (e) {
   attachError = (attachError ? attachError + '; ' : '') + String(e && e.message ? e.message : e);
 }
@@ -379,13 +451,17 @@ chrome.permissions.onAdded.addListener((p) => {
   if (p.origins && p.origins.length) chrome.runtime.reload();
 });
 
+chrome.storage.onChanged.addListener((changes, area) => {
+  if (area === 'local' && 'overlays' in changes) overlaysCache = null;
+});
+
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   const run = async () => {
     try {
       if (msg && msg.type === 'overlays-changed') {
         if (typeof msg.tabId === 'number' && msg.tabId >= 0 && msg.record) {
           await save(msg.tabId, msg.record);
-          await applyIcon(msg.tabId);
+          await applyIcon(msg.tabId, msg.record);
         }
         const tabs = await chrome.tabs.query({});
         for (const tab of tabs) {
@@ -393,8 +469,9 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
           if (msg.tabId === tab.id && msg.record) continue;
           const rec = await load(tab.id);
           if (!rec) continue;
-          await save(tab.id, await reclassifyRecord(rec));
-          await applyIcon(tab.id);
+          const updated = await reclassifyRecord(rec);
+          await save(tab.id, updated);
+          await applyIcon(tab.id, updated);
         }
       } else if (msg && msg.type === 'apply-icon' && typeof msg.tabId === 'number') {
         await applyIcon(msg.tabId);
@@ -420,8 +497,7 @@ chrome.tabs.onUpdated.addListener(async (tabId, info, tab) => {
         await applyIcon(tabId);
         return;
       }
-      await ensureRecord(tabId, url);
-      await applyIcon(tabId);
+      await applyIcon(tabId, await ensureRecord(tabId, url));
       return;
     }
     if (info.status !== 'complete') return;
@@ -433,11 +509,10 @@ chrome.tabs.onUpdated.addListener(async (tabId, info, tab) => {
     }
     const existing = await load(tabId);
     if (shouldKeepOnComplete(existing, url)) {
-      await applyIcon(tabId);
+      await applyIcon(tabId, existing);
       return;
     }
-    await ensureRecord(tabId, url);
-    await applyIcon(tabId);
+    await applyIcon(tabId, await ensureRecord(tabId, url));
   } catch {
     // ponytail: swallow — never throw out of service worker
   }
@@ -445,6 +520,7 @@ chrome.tabs.onUpdated.addListener(async (tabId, info, tab) => {
 
 chrome.tabs.onActivated.addListener(async ({ tabId }) => {
   try {
+    activeTabId = tabId;
     if (tabId < 0) return;
     let url = '';
     try {
@@ -455,11 +531,10 @@ chrome.tabs.onActivated.addListener(async ({ tabId }) => {
     }
     const existing = await load(tabId);
     if (shouldKeepOnComplete(existing, url)) {
-      await applyIcon(tabId);
+      await applyIcon(tabId, existing);
       return;
     }
-    await ensureRecord(tabId, url);
-    await applyIcon(tabId);
+    await applyIcon(tabId, await ensureRecord(tabId, url));
   } catch {
     // ponytail: swallow — never throw out of service worker
   }
@@ -468,6 +543,7 @@ chrome.tabs.onActivated.addListener(async ({ tabId }) => {
 chrome.tabs.onRemoved.addListener(async (tabId) => {
   try {
     tabHint.delete(tabId);
+    goodOrigins.delete(tabId);
     await chrome.storage.session.remove([tabKey(tabId), 'ok:' + tabId]);
   } catch {
     // ponytail: swallow — never throw out of service worker
