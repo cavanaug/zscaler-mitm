@@ -1,4 +1,4 @@
-import { formatCaptureDebug } from './debug.js';
+import { applyDebugVisibility, formatCaptureDebug } from './debug.js';
 import { loadOverlays, saveOverlays } from './overlay-store.js';
 import { storageOriginKey } from './tab-match.js';
 import {
@@ -18,6 +18,25 @@ import {
 
 const FLAG_DISABLED =
   'TLS cert API is disabled. Open chrome://flags, search WebRequestSecurityInfo, set Enabled, restart the browser. If that flag is missing, launch with --enable-features=WebRequestSecurityInfo';
+
+const DEBUG_KEY = 'showDebug';
+let showDebug = false;
+let debugState = null;
+
+async function initDebugUI() {
+  const debugEl = document.getElementById('debug');
+  const toggle = document.getElementById('debug-toggle');
+  applyDebugVisibility(false, debugEl, toggle);
+  const got = await chrome.storage.session.get(DEBUG_KEY);
+  showDebug = got[DEBUG_KEY] === true;
+  applyDebugVisibility(showDebug, debugEl, toggle);
+  toggle.addEventListener('click', async () => {
+    showDebug = !showDebug;
+    applyDebugVisibility(showDebug, debugEl, toggle);
+    await chrome.storage.session.set({ [DEBUG_KEY]: showDebug });
+    if (showDebug && debugState) paintDebug(debugState);
+  });
+}
 
 function nameBlock(title, name) {
   const wrap = document.createElement('div');
@@ -110,6 +129,7 @@ function reloadHint(hasHttps, meta) {
 }
 
 function paintDebug(state) {
+  if (!showDebug) return;
   document.getElementById('debug').textContent = formatCaptureDebug(state);
 }
 
@@ -274,6 +294,7 @@ async function wireAllow(state, overlays) {
 
 async function main() {
   document.getElementById('debug').textContent = 'popup.js running…';
+  await initDebugUI();
 
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
   if (!tab || typeof tab.id !== 'number') {
@@ -283,6 +304,7 @@ async function main() {
   }
 
   const state = await readState(tab);
+  debugState = state;
   let overlays = [];
   try {
     overlays = await loadOverlays();
@@ -296,7 +318,7 @@ async function main() {
   wireGrantRecapture(tab);
 
   if (state.record && state.record.error === null) {
-    ping({ type: 'apply-icon', tabId: tab.id });
+    ping({ type: 'apply-icon', tabId: tab.id, record: state.record });
   }
 
   await probeIfNeeded(state);

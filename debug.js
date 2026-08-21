@@ -47,3 +47,8 @@ export function formatCaptureDebug({ tab, record, meta, hasHttps, source, overla
   }
   return lines.join('\n');
 }
+
+export function applyDebugVisibility(show, debugEl, linkEl) {
+  if (debugEl) debugEl.hidden = !show;
+  if (linkEl) linkEl.textContent = show ? 'Hide debug' : 'Debug';
+}

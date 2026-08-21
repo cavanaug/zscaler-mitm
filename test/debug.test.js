@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { formatCaptureDebug } from '../debug.js';
+import { applyDebugVisibility, formatCaptureDebug } from '../debug.js';
 
 test('formatCaptureDebug: tab mismatch and last URL', () => {
   const text = formatCaptureDebug({
@@ -26,4 +26,15 @@ test('formatCaptureDebug: tab mismatch and last URL', () => {
   assert.match(text, /cdn\.amplitude\.com/);
   assert.match(text, /src=none/);
   assert.match(text, /httpsAccess yes/);
+});
+
+test('applyDebugVisibility toggles hidden and link label', () => {
+  const debugEl = { hidden: false };
+  const linkEl = { textContent: '' };
+  applyDebugVisibility(false, debugEl, linkEl);
+  assert.equal(debugEl.hidden, true);
+  assert.equal(linkEl.textContent, 'Debug');
+  applyDebugVisibility(true, debugEl, linkEl);
+  assert.equal(debugEl.hidden, false);
+  assert.equal(linkEl.textContent, 'Hide debug');
 });
