@@ -14,6 +14,7 @@ import {
   removeOverlayHost,
   parsePublicCas,
   pickPublicCas,
+  resolveNavRecord,
   shouldKeepOnComplete,
   shouldKeepRecord,
   statusLine,
@@ -349,5 +350,33 @@ test('shouldKeepRecord: keep parsed cert on same origin URL change', () => {
   };
   assert.equal(shouldKeepRecord(missing, 'https://example.com/index.html'), true);
   assert.equal(shouldKeepRecord(missing, 'https://other.example/'), false);
+});
+
+test('resolveNavRecord: do not keep prior-origin public cert after navigate to MITM host', () => {
+  const priorPublic = {
+    url: 'https://example.com/',
+    pageUrl: 'https://example.com/',
+    subject: { CN: 'example.com', O: '', OU: '' },
+    issuer: { CN: 'DigiCert', O: 'DigiCert Inc', OU: '' },
+    verdict: 'public',
+    error: null,
+  };
+  const intercept = {
+    url: 'https://bitwarden.com/',
+    pageUrl: 'https://bitwarden.com/',
+    subject: { CN: 'bitwarden.com', O: 'Zscaler Inc.', OU: 'Zscaler Inc.' },
+    issuer: {
+      CN: 'Zscaler Intermediate Root CA (zscalerthree.net) (t)',
+      O: 'Zscaler Inc.',
+      OU: 'Zscaler Inc.',
+    },
+    verdict: 'intercept',
+    error: null,
+  };
+  // Stale onUpdated snapshot alone must not win — that painted green over red.
+  assert.equal(resolveNavRecord(priorPublic, priorPublic, 'https://bitwarden.com/'), null);
+  // Capture won the race: second load sees intercept.
+  assert.equal(resolveNavRecord(priorPublic, intercept, 'https://bitwarden.com/'), intercept);
+  assert.equal(resolveNavRecord(intercept, intercept, 'https://bitwarden.com/'), intercept);
 });
 

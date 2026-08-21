@@ -8,6 +8,7 @@ import {
   pickPublicCas,
   shouldKeepOnComplete,
   shouldKeepRecord,
+  resolveNavRecord,
 } from './cert.js';
 import { parseNameConstraints, parseSpkiDer, parseX509Names } from './asn1.js';
 import { documentUrl, isOwnWebRequest, pickTabId, requestIsPageCert, shouldSkipCapture, storageOriginKey, storageOriginKeys } from './tab-match.js';
@@ -198,9 +199,12 @@ async function ensureRecord(tabId, url) {
     await save(tabId, record);
     return record;
   }
-  // never clobber a parsed cert with the reload placeholder (CDN hops + onUpdated race)
-  if (existing && existing.error === null) return existing;
-  if (shouldKeepRecord(existing, url)) return existing;
+  // Re-read when the first snapshot does not fit — a concurrent capture may have landed
+  // (stale prior-origin + late applyIcon was painting green over intercept).
+  if (shouldKeepOnComplete(existing, url)) return existing;
+  const latest = await load(tabId);
+  const kept = resolveNavRecord(existing, latest, url);
+  if (kept) return kept;
   const error = attachedSpec ? 'reload' : 'no-security-info';
   const record = blank(url, error);
   await save(tabId, record);
@@ -474,7 +478,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
           await applyIcon(tab.id, updated);
         }
       } else if (msg && msg.type === 'apply-icon' && typeof msg.tabId === 'number') {
-        await applyIcon(msg.tabId);
+        await applyIcon(msg.tabId, msg.record);
       } else if (msg && msg.type === 'probe' && typeof msg.url === 'string') {
         await probeFetch(msg.url);
       }

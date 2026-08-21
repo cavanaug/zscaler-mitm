@@ -228,3 +228,10 @@ export function shouldKeepOnComplete(existing, url) {
   return certFitsTab(existing.url, url);
 }
 
+/** Pick cert after tab URL change. `latest` is a re-read so a concurrent capture wins. */
+export function resolveNavRecord(existing, latest, url) {
+  if (shouldKeepOnComplete(existing, url)) return existing;
+  if (latest && latest !== existing && shouldKeepOnComplete(latest, url)) return latest;
+  return null;
+}
+
